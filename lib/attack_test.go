@@ -22,6 +22,11 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+type noopPacer struct{}
+
+func (noopPacer) Pace(time.Duration, uint64) (time.Duration, bool) { return 0, false }
+func (noopPacer) Rate(time.Duration) float64                       { return 0 }
+
 func TestAttackRate(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(
@@ -61,6 +66,66 @@ func TestAttackDuration(t *testing.T) {
 		t.Errorf("got %v hits, want: %v", got, want)
 	} else if got, want := m.Duration.Round(time.Second), time.Second; got != want {
 		t.Errorf("got duration %s, want %s", got, want)
+	}
+}
+
+func TestSendDelayNanos(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		pacer   Pacer
+		elapsed time.Duration
+		hits    uint64
+		want    time.Duration
+	}{
+		{
+			name:    "constant behind",
+			pacer:   ConstantPacer{Freq: 10, Per: time.Second},
+			elapsed: time.Second,
+			hits:    0,
+			want:    time.Second,
+		},
+		{
+			name:    "linear behind",
+			pacer:   LinearPacer{StartAt: Rate{Freq: 10, Per: time.Second}, Slope: 0},
+			elapsed: time.Second,
+			hits:    0,
+			want:    time.Second,
+		},
+		{
+			name: "sine behind",
+			pacer: SinePacer{
+				Period:  time.Minute,
+				Mean:    Rate{Freq: 10, Per: time.Second},
+				Amp:     Rate{Freq: 0, Per: time.Second},
+				StartAt: MeanUp,
+			},
+			elapsed: time.Second,
+			hits:    0,
+			want:    time.Second,
+		},
+		{
+			name:    "not behind",
+			pacer:   ConstantPacer{Freq: 10, Per: time.Second},
+			elapsed: time.Second,
+			hits:    10,
+			want:    0,
+		},
+		{
+			name:    "unsupported pacer",
+			pacer:   noopPacer{},
+			elapsed: time.Second,
+			hits:    0,
+			want:    0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := time.Duration(sendDelayNanos(tc.pacer, tc.elapsed, tc.hits))
+			if !durationEqual(got, tc.want) {
+				t.Fatalf("sendDelayNanos(%T, %v, %d) = %v, want %v", tc.pacer, tc.elapsed, tc.hits, got, tc.want)
+			}
+		})
 	}
 }
 

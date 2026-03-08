@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/dnscache"
@@ -32,6 +33,12 @@ type Attacker struct {
 	seq        uint64
 	began      time.Time
 	chunked    bool
+
+	currentWorkers int64
+	activeConns    int64
+	sendDelayNanos int64
+	inFlight       int64
+	completions    int64
 }
 
 const (
@@ -65,6 +72,16 @@ var (
 	DefaultTLSConfig = &tls.Config{InsecureSkipVerify: false}
 )
 
+// RuntimeMetrics holds point-in-time attacker internals useful for time-series tracking.
+type RuntimeMetrics struct {
+	Timestamp   time.Time
+	Workers     uint64
+	Connections uint64
+	SendDelay   time.Duration
+	InFlight    uint64
+	Completions uint64
+}
+
 // NewAttacker returns a new Attacker with default options which are overridden
 // by the optionally provided opts.
 func NewAttacker(opts ...func(*Attacker)) *Attacker {
@@ -85,7 +102,7 @@ func NewAttacker(opts ...func(*Attacker)) *Attacker {
 		Timeout: DefaultTimeout,
 		Transport: &http.Transport{
 			Proxy:               http.ProxyFromEnvironment,
-			DialContext:         a.dialer.DialContext,
+			DialContext:         a.trackDialContext(a.dialer.DialContext),
 			TLSClientConfig:     DefaultTLSConfig,
 			MaxIdleConnsPerHost: DefaultConnections,
 			MaxConnsPerHost:     DefaultMaxConnections,
@@ -177,7 +194,7 @@ func LocalAddr(addr net.IPAddr) func(*Attacker) {
 	return func(a *Attacker) {
 		tr := a.client.Transport.(*http.Transport)
 		a.dialer.LocalAddr = &net.TCPAddr{IP: addr.IP, Zone: addr.Zone}
-		tr.DialContext = a.dialer.DialContext
+		tr.DialContext = a.trackDialContext(a.dialer.DialContext)
 	}
 }
 
@@ -189,7 +206,7 @@ func KeepAlive(keepalive bool) func(*Attacker) {
 		tr.DisableKeepAlives = !keepalive
 		if !keepalive {
 			a.dialer.KeepAlive = 0
-			tr.DialContext = a.dialer.DialContext
+			tr.DialContext = a.trackDialContext(a.dialer.DialContext)
 		}
 	}
 }
@@ -241,9 +258,9 @@ func MaxBody(n int64) func(*Attacker) {
 func UnixSocket(socket string) func(*Attacker) {
 	return func(a *Attacker) {
 		if tr, ok := a.client.Transport.(*http.Transport); socket != "" && ok {
-			tr.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
+			tr.DialContext = a.trackDialContext(func(_ context.Context, _, _ string) (net.Conn, error) {
 				return net.Dial("unix", socket)
-			}
+			})
 		}
 	}
 }
@@ -304,13 +321,13 @@ func ConnectTo(addrMap map[string][]string) func(*Attacker) {
 			connectTo[k] = &roundRobin{addrs: v}
 		}
 
-		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		tr.DialContext = a.trackDialContext(func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if cm, ok := connectTo[addr]; ok {
 				cm.n = (cm.n + 1) % len(cm.addrs)
 				addr = cm.addrs[cm.n]
 			}
 			return dial(ctx, network, addr)
-		}
+		})
 	}
 }
 
@@ -351,7 +368,7 @@ func DNSCaching(ttl time.Duration) func(*Attacker) {
 
 			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-			tr.DialContext = func(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+			tr.DialContext = a.trackDialContext(func(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 				host, port, err := net.SplitHostPort(addr)
 				if err != nil {
 					return nil, err
@@ -399,7 +416,7 @@ func DNSCaching(ttl time.Duration) func(*Attacker) {
 				}
 
 				return conn, err
-			}
+			})
 		}
 	}
 }
@@ -478,6 +495,8 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 				return
 			}
 
+			atomic.StoreInt64(&a.sendDelayNanos, sendDelayNanos(p, elapsed, count))
+
 			wait, stop := p.Pace(elapsed, count)
 			if stop {
 				return
@@ -512,6 +531,58 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 	return results
 }
 
+func sendDelayNanos(p Pacer, elapsed time.Duration, hits uint64) int64 {
+	var expectedHits float64
+	switch p := p.(type) {
+	case ConstantPacer:
+		if p.Per <= 0 || p.Freq <= 0 {
+			return 0
+		}
+		expectedHits = float64(p.Freq) * float64(elapsed) / float64(p.Per)
+	case *ConstantPacer:
+		if p == nil || p.Per <= 0 || p.Freq <= 0 {
+			return 0
+		}
+		expectedHits = float64(p.Freq) * float64(elapsed) / float64(p.Per)
+	case LinearPacer:
+		expectedHits = p.hits(elapsed)
+	case *LinearPacer:
+		if p == nil {
+			return 0
+		}
+		expectedHits = p.hits(elapsed)
+	case SinePacer:
+		expectedHits = p.hits(elapsed)
+	case *SinePacer:
+		if p == nil {
+			return 0
+		}
+		expectedHits = p.hits(elapsed)
+	default:
+		return 0
+	}
+
+	deficit := expectedHits - float64(hits)
+	if deficit <= 0 {
+		return 0
+	}
+
+	rate := p.Rate(elapsed)
+	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return 0
+	}
+
+	delayNanos := deficit * (1e9 / rate)
+	if delayNanos <= 0 || math.IsNaN(delayNanos) || math.IsInf(delayNanos, 0) {
+		return 0
+	}
+	if delayNanos > float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+
+	return int64(delayNanos)
+}
+
 // Stop stops the current attack. The return value indicates whether this call
 // has signalled the attack to stop (`true` for the first call) or whether it
 // was a noop because it has been previously signalled to stop (`false` for any
@@ -528,9 +599,80 @@ func (a *Attacker) Stop() bool {
 
 func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, ticks <-chan struct{}, results chan<- *Result) {
 	defer workers.Done()
+	atomic.AddInt64(&a.currentWorkers, 1)
+	defer atomic.AddInt64(&a.currentWorkers, -1)
+
 	for range ticks {
-		results <- a.hit(tr, atk)
+		atomic.AddInt64(&a.inFlight, 1)
+		res := a.hit(tr, atk)
+		atomic.AddInt64(&a.inFlight, -1)
+		atomic.AddInt64(&a.completions, 1)
+		results <- res
 	}
+}
+
+// RuntimeMetrics returns a snapshot of attacker internals.
+func (a *Attacker) RuntimeMetrics() RuntimeMetrics {
+	workers := atomic.LoadInt64(&a.currentWorkers)
+	if workers < 0 {
+		workers = 0
+	}
+	connections := atomic.LoadInt64(&a.activeConns)
+	if connections < 0 {
+		connections = 0
+	}
+	inFlight := atomic.LoadInt64(&a.inFlight)
+	if inFlight < 0 {
+		inFlight = 0
+	}
+	completions := atomic.LoadInt64(&a.completions)
+	if completions < 0 {
+		completions = 0
+	}
+	delayNanos := atomic.LoadInt64(&a.sendDelayNanos)
+	if delayNanos < 0 {
+		delayNanos = 0
+	}
+
+	return RuntimeMetrics{
+		Timestamp:   time.Now(),
+		Workers:     uint64(workers),
+		Connections: uint64(connections),
+		SendDelay:   time.Duration(delayNanos),
+		InFlight:    uint64(inFlight),
+		Completions: uint64(completions),
+	}
+}
+
+func (a *Attacker) trackDialContext(dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := conn.(*trackedConn); ok {
+			return conn, nil
+		}
+		atomic.AddInt64(&a.activeConns, 1)
+		return &trackedConn{
+			Conn: conn,
+			onClose: func() {
+				atomic.AddInt64(&a.activeConns, -1)
+			},
+		}, nil
+	}
+}
+
+type trackedConn struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.onClose)
+	return err
 }
 
 func (a *Attacker) hit(tr Targeter, atk *attack) *Result {

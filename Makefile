@@ -8,8 +8,12 @@ vegeta: generate
 
 generate: GOARCH := $(shell go env GOHOSTARCH)
 generate: GOOS := $(shell go env GOHOSTOS)
+generate: GOTOOLBIN := $(shell go env GOPATH)/bin
 generate:
 	go install github.com/mailru/easyjson/...@latest
 	go get github.com/shurcooL/vfsgen
 	go install github.com/shurcooL/vfsgen/...@latest
-	go generate ./...
+	PATH="$(GOTOOLBIN):$$PATH" go generate ./...
+
+clean:
+	rm -f *.csv

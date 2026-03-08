@@ -35,6 +35,8 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/shurcooL/httpfs v0.0.0-20230704072500-f1e31cf0ba5c // indirect
+	github.com/shurcooL/vfsgen v0.0.0-20230704071429-0000e147ea92 // indirect
 	golang.org/x/exp v0.0.0-20240119083558-1b970713d09a // indirect
 	golang.org/x/mod v0.19.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect

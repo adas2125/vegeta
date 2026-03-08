@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +62,8 @@ func attackCmd() command {
 	fs.BoolVar(&opts.keepalive, "keepalive", true, "Use persistent connections")
 	fs.StringVar(&opts.unixSocket, "unix-socket", "", "Connect over a unix socket. This overrides the host address in target URLs")
 	fs.StringVar(&opts.promAddr, "prometheus-addr", "", "Prometheus exporter listen address [empty = disabled]. Example: 0.0.0.0:8880")
+	fs.StringVar(&opts.metricsCSV, "metrics-csv", "results.csv", "CSV file path for runtime attack metrics over time [empty = disabled]")
+	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
 	fs.Var(&dnsTTLFlag{&opts.dnsTTL}, "dns-ttl", "Cache DNS lookups for the given duration [-1 = disabled, 0 = forever]")
 	fs.BoolVar(&opts.sessionTickets, "session-tickets", false, "Enable TLS session resumption using session tickets")
 	fs.Var(&connectToFlag{&opts.connectTo}, "connect-to", "A mapping of (ip|host):port to use instead of a target URL's (ip|host):port. Can be repeated multiple times.\nIdentical src:port with different dst:port will round-robin over the different dst:port pairs.\nExample: google.com:80:localhost:6060")
@@ -78,38 +82,40 @@ var (
 
 // attackOpts aggregates the attack function command options
 type attackOpts struct {
-	name           string
-	targetsf       string
-	format         string
-	outputf        string
-	bodyf          string
-	certf          string
-	keyf           string
-	rootCerts      csl
-	http2          bool
-	h2c            bool
-	insecure       bool
-	lazy           bool
-	chunked        bool
-	duration       time.Duration
-	timeout        time.Duration
-	rate           vegeta.Rate
-	workers        uint64
-	maxWorkers     uint64
-	connections    int
-	maxConnections int
-	redirects      int
-	maxBody        int64
-	headers        headers
-	proxyHeaders   headers
-	laddr          localAddr
-	keepalive      bool
-	resolvers      csl
-	unixSocket     string
-	promAddr       string
-	dnsTTL         time.Duration
-	sessionTickets bool
-	connectTo      map[string][]string
+	name            string
+	targetsf        string
+	format          string
+	outputf         string
+	bodyf           string
+	certf           string
+	keyf            string
+	rootCerts       csl
+	http2           bool
+	h2c             bool
+	insecure        bool
+	lazy            bool
+	chunked         bool
+	duration        time.Duration
+	timeout         time.Duration
+	rate            vegeta.Rate
+	workers         uint64
+	maxWorkers      uint64
+	connections     int
+	maxConnections  int
+	redirects       int
+	maxBody         int64
+	headers         headers
+	proxyHeaders    headers
+	laddr           localAddr
+	keepalive       bool
+	resolvers       csl
+	unixSocket      string
+	promAddr        string
+	metricsCSV      string
+	metricsInterval time.Duration
+	dnsTTL          time.Duration
+	sessionTickets  bool
+	connectTo       map[string][]string
 }
 
 // attack validates the attack arguments, sets up the
@@ -224,12 +230,21 @@ func attack(opts *attackOpts) (err error) {
 		vegeta.SessionTickets(opts.sessionTickets),
 	)
 
+	var mw *metricsCSVWriter
+	if opts.metricsCSV != "" {
+		mw, err = newMetricsCSVWriter(opts.metricsCSV)
+		if err != nil {
+			return fmt.Errorf("error creating %s: %s", opts.metricsCSV, err)
+		}
+		defer mw.Close()
+	}
+
 	res := atk.Attack(tr, opts.rate, opts.duration, opts.name)
 	enc := vegeta.NewEncoder(out)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	return processAttack(atk, res, enc, sig, pm)
+	return processAttack(atk, res, enc, sig, pm, mw, opts.metricsInterval)
 }
 
 func processAttack(
@@ -238,7 +253,22 @@ func processAttack(
 	enc vegeta.Encoder,
 	sig <-chan os.Signal,
 	pm *prom.Metrics,
+	mw *metricsCSVWriter,
+	metricsInterval time.Duration,
 ) error {
+	if metricsInterval <= 0 {
+		metricsInterval = time.Second
+	}
+
+	ticker := time.NewTicker(metricsInterval)
+	defer ticker.Stop()
+
+	if mw != nil {
+		if err := mw.Write(atk.RuntimeMetrics()); err != nil {
+			return err
+		}
+	}
+
 	for {
 		select {
 		case <-sig:
@@ -248,6 +278,11 @@ func processAttack(
 			}
 		case r, ok := <-res:
 			if !ok {
+				if mw != nil {
+					if err := mw.Write(atk.RuntimeMetrics()); err != nil {
+						return err
+					}
+				}
 				return nil
 			}
 
@@ -258,8 +293,80 @@ func processAttack(
 			if err := enc.Encode(r); err != nil {
 				return err
 			}
+		case <-ticker.C:
+			// whenever the ticker fires, write the current runtime metrics to the CSV file
+			if mw != nil {
+				if err := mw.Write(atk.RuntimeMetrics()); err != nil {
+					return err
+				}
+			}
 		}
 	}
+}
+
+type metricsCSVWriter struct {
+	file      *os.File
+	csv       *csv.Writer
+	startTime time.Time
+}
+
+func newMetricsCSVWriter(path string) (*metricsCSVWriter, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+
+	w := csv.NewWriter(f)
+	if err := w.Write([]string{
+		"timestamp",
+		"elapsed_ms",
+		"workers",
+		"connections",
+		"send_delay_ms",
+		"in_flight",
+		"completions",
+	}); err != nil {
+		f.Close()
+		return nil, err
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	return &metricsCSVWriter{file: f, csv: w}, nil
+}
+
+func (m *metricsCSVWriter) Close() error {
+	m.csv.Flush()
+	if err := m.csv.Error(); err != nil {
+		_ = m.file.Close()
+		return err
+	}
+	return m.file.Close()
+}
+
+func (m *metricsCSVWriter) Write(metrics vegeta.RuntimeMetrics) error {
+	if m.startTime.IsZero() {
+		m.startTime = metrics.Timestamp
+	}
+	elapsedMS := metrics.Timestamp.Sub(m.startTime).Milliseconds()
+
+	rec := []string{
+		metrics.Timestamp.UTC().Format(time.RFC3339Nano),
+		strconv.FormatInt(elapsedMS, 10),
+		strconv.FormatUint(metrics.Workers, 10),
+		strconv.FormatUint(metrics.Connections, 10),
+		strconv.FormatFloat(float64(metrics.SendDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatUint(metrics.InFlight, 10),
+		strconv.FormatUint(metrics.Completions, 10),
+	}
+	if err := m.csv.Write(rec); err != nil {
+		return err
+	}
+	m.csv.Flush()
+	return m.csv.Error()
 }
 
 // tlsConfig builds a *tls.Config from the given options.
