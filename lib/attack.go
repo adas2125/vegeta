@@ -47,6 +47,7 @@ type Attacker struct {
 	traceFirstByteRTT   int64
 	traceFirstByteDelay int64
 	traceTotalLatency   int64
+	traceCh             chan *RequestRecord
 }
 
 // creating a struct to hold information related to each request
@@ -117,6 +118,10 @@ type RuntimeMetrics struct {
 
 type FireEvent struct {
 	TargetFireTime time.Time
+}
+
+func (a *Attacker) TraceRecords() <-chan *RequestRecord {
+	return a.traceCh
 }
 
 // NewAttacker returns a new Attacker with default options which are overridden
@@ -511,7 +516,9 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 	}
 
 	results := make(chan *Result)
+	a.traceCh = make(chan *RequestRecord, 1024)
 	ticks := make(chan *FireEvent)
+
 	for i := uint64(0); i < workers; i++ {
 		wg.Add(1)
 		go a.attack(tr, atk, &wg, ticks, results)
@@ -521,6 +528,7 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 		defer func() {
 			close(ticks)
 			wg.Wait()
+			close(a.traceCh)
 			close(results)
 			a.Stop()
 		}()
@@ -663,6 +671,7 @@ func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, tic
 		// update inflgiht and completions, add the result
 		atomic.AddInt64(&a.inFlight, -1)
 		atomic.AddInt64(&a.completions, 1)
+		a.traceCh <- rec
 		results <- res
 	}
 }
