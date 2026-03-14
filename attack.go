@@ -325,6 +325,12 @@ func newMetricsCSVWriter(path string) (*metricsCSVWriter, error) {
 		"send_delay_ms",
 		"in_flight",
 		"completions",
+		"scheduler_delay_ms",
+		"conn_delay_ms",
+		"write_delay_ms",
+		"first_byte_rtt_ms",
+		"first_byte_delay_ms",
+		"total_latency_ms",
 	}); err != nil {
 		f.Close()
 		return nil, err
@@ -361,6 +367,12 @@ func (m *metricsCSVWriter) Write(metrics vegeta.RuntimeMetrics) error {
 		strconv.FormatFloat(float64(metrics.SendDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatUint(metrics.InFlight, 10),
 		strconv.FormatUint(metrics.Completions, 10),
+		strconv.FormatFloat(float64(metrics.SchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(metrics.ConnDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(metrics.WriteDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(metrics.FirstByteRTT)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(metrics.FirstByteDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(metrics.TotalLatency)/float64(time.Millisecond), 'f', 3, 64),
 	}
 	if err := m.csv.Write(rec); err != nil {
 		return err

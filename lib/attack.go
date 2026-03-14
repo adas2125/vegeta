@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -34,11 +36,36 @@ type Attacker struct {
 	began      time.Time
 	chunked    bool
 
-	currentWorkers int64
-	activeConns    int64
-	sendDelayNanos int64
-	inFlight       int64
-	completions    int64
+	currentWorkers      int64
+	activeConns         int64
+	sendDelayNanos      int64
+	inFlight            int64
+	schedulerDelay      int64
+	completions         int64
+	traceConnDelay      int64
+	traceWriteDelay     int64
+	traceFirstByteRTT   int64
+	traceFirstByteDelay int64
+	traceTotalLatency   int64
+}
+
+// creating a struct to hold information related to each request
+type RequestRecord struct {
+	ID             uint64
+	TargetFireTime time.Time
+	WakeTime       time.Time
+	DispatchStart  time.Time
+	GotConnTime    time.Time
+	WroteReqTime   time.Time
+	FirstByteTime  time.Time
+	DoneTime       time.Time
+	DispatchDelay  time.Duration
+	ConnDelay      time.Duration
+	WriteDelay     time.Duration
+	FirstByteRTT   time.Duration
+	FirstByteDelay time.Duration
+	TotalLatency   time.Duration
+	SchedulerDelay time.Duration
 }
 
 const (
@@ -74,12 +101,22 @@ var (
 
 // RuntimeMetrics holds point-in-time attacker internals useful for time-series tracking.
 type RuntimeMetrics struct {
-	Timestamp   time.Time
-	Workers     uint64
-	Connections uint64
-	SendDelay   time.Duration
-	InFlight    uint64
-	Completions uint64
+	Timestamp      time.Time
+	Workers        uint64
+	Connections    uint64
+	SendDelay      time.Duration
+	InFlight       uint64
+	Completions    uint64
+	SchedulerDelay time.Duration
+	ConnDelay      time.Duration
+	WriteDelay     time.Duration
+	FirstByteRTT   time.Duration
+	FirstByteDelay time.Duration
+	TotalLatency   time.Duration
+}
+
+type FireEvent struct {
+	TargetFireTime time.Time
 }
 
 // NewAttacker returns a new Attacker with default options which are overridden
@@ -474,7 +511,7 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 	}
 
 	results := make(chan *Result)
-	ticks := make(chan struct{})
+	ticks := make(chan *FireEvent)
 	for i := uint64(0); i < workers; i++ {
 		wg.Add(1)
 		go a.attack(tr, atk, &wg, ticks, results)
@@ -502,11 +539,22 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 				return
 			}
 
+			// measure scheduler delay
+			beforeSleep := time.Now()
+			target := beforeSleep.Add(wait)
 			time.Sleep(wait)
+			wake := time.Now()
+			schedulerDelay := wake.Sub(target)
+			if schedulerDelay < 0 {
+				schedulerDelay = 0
+			}
+
+			atomic.StoreInt64(&a.schedulerDelay, int64(schedulerDelay))
 
 			if workers < a.maxWorkers {
 				select {
-				case ticks <- struct{}{}:
+				// send the firetick struct to the ticks channel to signal a worker to fire a request
+				case ticks <- &FireEvent{TargetFireTime: target}:
 					count++
 					continue
 				case <-a.stopch:
@@ -520,7 +568,7 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 			}
 
 			select {
-			case ticks <- struct{}{}:
+			case ticks <- &FireEvent{TargetFireTime: target}:
 				count++
 			case <-a.stopch:
 				return
@@ -597,14 +645,22 @@ func (a *Attacker) Stop() bool {
 	}
 }
 
-func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, ticks <-chan struct{}, results chan<- *Result) {
+func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, ticks <-chan *FireEvent, results chan<- *Result) {
 	defer workers.Done()
 	atomic.AddInt64(&a.currentWorkers, 1)
 	defer atomic.AddInt64(&a.currentWorkers, -1)
 
-	for range ticks {
+	for fire := range ticks {
 		atomic.AddInt64(&a.inFlight, 1)
-		res := a.hit(tr, atk)
+
+		// create a new RequestRecord for this request
+		rec := &RequestRecord{}
+		rec.TargetFireTime = fire.TargetFireTime
+		rec.WakeTime = time.Now()
+
+		res := a.hit(tr, atk, rec)
+
+		// update inflgiht and completions, add the result
 		atomic.AddInt64(&a.inFlight, -1)
 		atomic.AddInt64(&a.completions, 1)
 		results <- res
@@ -633,14 +689,44 @@ func (a *Attacker) RuntimeMetrics() RuntimeMetrics {
 	if delayNanos < 0 {
 		delayNanos = 0
 	}
+	schedulerDelay := atomic.LoadInt64(&a.schedulerDelay)
+	if schedulerDelay < 0 {
+		schedulerDelay = 0
+	}
+	connDelay := atomic.LoadInt64(&a.traceConnDelay)
+	if connDelay < 0 {
+		connDelay = 0
+	}
+	writeDelay := atomic.LoadInt64(&a.traceWriteDelay)
+	if writeDelay < 0 {
+		writeDelay = 0
+	}
+	firstByteRTT := atomic.LoadInt64(&a.traceFirstByteRTT)
+	if firstByteRTT < 0 {
+		firstByteRTT = 0
+	}
+	firstByteDelay := atomic.LoadInt64(&a.traceFirstByteDelay)
+	if firstByteDelay < 0 {
+		firstByteDelay = 0
+	}
+	totalLatency := atomic.LoadInt64(&a.traceTotalLatency)
+	if totalLatency < 0 {
+		totalLatency = 0
+	}
 
 	return RuntimeMetrics{
-		Timestamp:   time.Now(),
-		Workers:     uint64(workers),
-		Connections: uint64(connections),
-		SendDelay:   time.Duration(delayNanos),
-		InFlight:    uint64(inFlight),
-		Completions: uint64(completions),
+		Timestamp:      time.Now(),
+		Workers:        uint64(workers),
+		Connections:    uint64(connections),
+		SendDelay:      time.Duration(delayNanos),
+		InFlight:       uint64(inFlight),
+		Completions:    uint64(completions),
+		SchedulerDelay: time.Duration(schedulerDelay),
+		ConnDelay:      time.Duration(connDelay),
+		WriteDelay:     time.Duration(writeDelay),
+		FirstByteRTT:   time.Duration(firstByteRTT),
+		FirstByteDelay: time.Duration(firstByteDelay),
+		TotalLatency:   time.Duration(totalLatency),
 	}
 }
 
@@ -675,11 +761,17 @@ func (c *trackedConn) Close() error {
 	return err
 }
 
-func (a *Attacker) hit(tr Targeter, atk *attack) *Result {
+func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 	var (
 		res = Result{Attack: atk.name}
 		tgt Target
 		err error
+
+		traceMu    sync.Mutex
+		tDispatch  time.Time
+		tGotConn   time.Time
+		tWroteReq  time.Time
+		tFirstByte time.Time
 	)
 
 	//
@@ -698,7 +790,70 @@ func (a *Attacker) hit(tr Targeter, atk *attack) *Result {
 	atk.seq++
 	atk.seqmu.Unlock()
 
+	rec.ID = res.Seq
+
 	defer func() {
+		traceMu.Lock()
+		dispatch := tDispatch
+		gotConn := tGotConn
+		wroteReq := tWroteReq
+		firstByte := tFirstByte
+		traceMu.Unlock()
+
+		tDone := time.Now()
+
+		// update record & add to result
+		rec.DoneTime = tDone
+		rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
+		rec.ConnDelay = rec.GotConnTime.Sub(rec.DispatchStart)
+		rec.WriteDelay = rec.WroteReqTime.Sub(rec.GotConnTime)
+		rec.FirstByteRTT = rec.FirstByteTime.Sub(rec.WroteReqTime)
+		rec.FirstByteDelay = rec.FirstByteTime.Sub(rec.DispatchStart) // time from dispatch to first byte
+		rec.TotalLatency = rec.DoneTime.Sub(rec.WakeTime)
+		rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
+
+		// print first 10 results to stdout
+		if rec != nil && rec.ID < 10 {
+			fmt.Fprintf(os.Stderr, "Seq=%d Wake=%v Dispatch=%v GotConn=%v Wrote=%v FirstByte=%v Done=%v, Target Fire Time=%v\n",
+				rec.ID,
+				rec.WakeTime,
+				rec.DispatchStart,
+				rec.GotConnTime,
+				rec.WroteReqTime,
+				rec.FirstByteTime,
+				rec.DoneTime,
+				rec.TargetFireTime,
+			)
+
+			fmt.Fprintf(os.Stderr, "Seq=%d DispatchDelay=%v ConnDelay=%v WriteDelay=%v FirstByteRTT=%v FirstByteDelay=%v TotalLatency=%v SchedulerDelay=%v\n",
+				rec.ID,
+				rec.DispatchDelay,
+				rec.ConnDelay,
+				rec.WriteDelay,
+				rec.FirstByteRTT,
+				rec.FirstByteDelay,
+				rec.TotalLatency,
+				rec.SchedulerDelay,
+			)
+
+		}
+
+		// update the trace metrics in the attacker struct
+		if !dispatch.IsZero() {
+			atomic.StoreInt64(&a.traceTotalLatency, int64(tDone.Sub(dispatch)))
+			if !gotConn.IsZero() {
+				atomic.StoreInt64(&a.traceConnDelay, int64(gotConn.Sub(dispatch)))
+				if !wroteReq.IsZero() {
+					atomic.StoreInt64(&a.traceWriteDelay, int64(wroteReq.Sub(gotConn)))
+				}
+				if !firstByte.IsZero() && !wroteReq.IsZero() {
+					atomic.StoreInt64(&a.traceFirstByteRTT, int64(firstByte.Sub(wroteReq)))
+				}
+			}
+			if !wroteReq.IsZero() && !firstByte.IsZero() {
+				atomic.StoreInt64(&a.traceFirstByteDelay, int64(firstByte.Sub(dispatch)))
+			}
+		}
 		res.Latency = time.Since(res.Timestamp)
 		if err != nil {
 			res.Error = err.Error()
@@ -728,6 +883,34 @@ func (a *Attacker) hit(tr Targeter, atk *attack) *Result {
 		req.TransferEncoding = append(req.TransferEncoding, "chunked")
 	}
 
+	trace := &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) {
+			traceMu.Lock()
+			tGotConn = time.Now()
+			rec.GotConnTime = tGotConn
+			traceMu.Unlock()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				traceMu.Lock()
+				tWroteReq = time.Now()
+				rec.WroteReqTime = tWroteReq
+				traceMu.Unlock()
+			}
+		},
+		GotFirstResponseByte: func() {
+			traceMu.Lock()
+			tFirstByte = time.Now()
+			rec.FirstByteTime = tFirstByte
+			traceMu.Unlock()
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
+	traceMu.Lock()
+	tDispatch = time.Now()
+	rec.DispatchStart = tDispatch
+	traceMu.Unlock()
 	r, err := a.client.Do(req)
 	if err != nil {
 		return &res
