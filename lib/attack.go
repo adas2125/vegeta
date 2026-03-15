@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -61,12 +60,19 @@ type RequestRecord struct {
 	FirstByteTime  time.Time
 	DoneTime       time.Time
 	DispatchDelay  time.Duration
+	DispatchDelayValid bool
 	ConnDelay      time.Duration
+	ConnDelayValid bool
 	WriteDelay     time.Duration
+	WriteDelayValid bool
 	FirstByteRTT   time.Duration
+	FirstByteRTTValid bool
 	FirstByteDelay time.Duration
+	FirstByteDelayValid bool
 	TotalLatency   time.Duration
+	TotalLatencyValid bool
 	SchedulerDelay time.Duration
+	SchedulerDelayValid bool
 }
 
 const (
@@ -770,6 +776,16 @@ func (c *trackedConn) Close() error {
 	return err
 }
 
+func checkValidTime(t1 time.Time, t2 time.Time) bool {
+	if t1.IsZero() || t2.IsZero() {
+		return false
+	}
+	if t2.Before(t1) {
+		return false
+	}
+	return true
+}
+
 func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 	var (
 		res = Result{Attack: atk.name}
@@ -813,39 +829,72 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 
 		// update record & add to result
 		rec.DoneTime = tDone
-		rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
-		rec.ConnDelay = rec.GotConnTime.Sub(rec.DispatchStart)
-		rec.WriteDelay = rec.WroteReqTime.Sub(rec.GotConnTime)
-		rec.FirstByteRTT = rec.FirstByteTime.Sub(rec.WroteReqTime)
-		rec.FirstByteDelay = rec.FirstByteTime.Sub(rec.DispatchStart) // time from dispatch to first byte
-		rec.TotalLatency = rec.DoneTime.Sub(rec.WakeTime)
-		rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
+		// if !rec.DispatchStart.IsZero() && !rec.WakeTime.IsZero() && !rec.DispatchStart.Before(rec.WakeTime) {
+		// 	rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
+		// } else {
+		// 	rec.DispatchDelay = 0
+		// }
 
-		// print first 10 results to stdout
-		if rec != nil && rec.ID < 10 {
-			fmt.Fprintf(os.Stderr, "Seq=%d Wake=%v Dispatch=%v GotConn=%v Wrote=%v FirstByte=%v Done=%v, Target Fire Time=%v\n",
-				rec.ID,
-				rec.WakeTime,
-				rec.DispatchStart,
-				rec.GotConnTime,
-				rec.WroteReqTime,
-				rec.FirstByteTime,
-				rec.DoneTime,
-				rec.TargetFireTime,
-			)
+		if checkValidTime(rec.WakeTime, rec.DispatchStart) {
+			rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
+			rec.DispatchDelayValid = true
+		} else {rec.DispatchDelay = 0; rec.DispatchDelayValid = false}
 
-			fmt.Fprintf(os.Stderr, "Seq=%d DispatchDelay=%v ConnDelay=%v WriteDelay=%v FirstByteRTT=%v FirstByteDelay=%v TotalLatency=%v SchedulerDelay=%v\n",
-				rec.ID,
-				rec.DispatchDelay,
-				rec.ConnDelay,
-				rec.WriteDelay,
-				rec.FirstByteRTT,
-				rec.FirstByteDelay,
-				rec.TotalLatency,
-				rec.SchedulerDelay,
-			)
+		if checkValidTime(rec.DispatchStart, rec.GotConnTime) {
+			rec.ConnDelay = rec.GotConnTime.Sub(rec.DispatchStart)
+			rec.ConnDelayValid = true
+		} else {rec.ConnDelay = 0; rec.ConnDelayValid = false}
 
-		}
+		if checkValidTime(rec.GotConnTime, rec.WroteReqTime) {
+			rec.WriteDelay = rec.WroteReqTime.Sub(rec.GotConnTime)
+			rec.WriteDelayValid = true
+		} else {rec.WriteDelay = 0; rec.WriteDelayValid = false}
+
+		if checkValidTime(rec.WroteReqTime, rec.FirstByteTime) {
+			rec.FirstByteRTT = rec.FirstByteTime.Sub(rec.WroteReqTime)
+			rec.FirstByteRTTValid = true
+		} else {rec.FirstByteRTT = 0; rec.FirstByteRTTValid = false}
+
+		if checkValidTime(rec.DispatchStart, rec.FirstByteTime) {
+			rec.FirstByteDelay = rec.FirstByteTime.Sub(rec.DispatchStart)
+			rec.FirstByteDelayValid = true
+		} else {rec.FirstByteDelay = 0; rec.FirstByteDelayValid = false}
+
+		if checkValidTime(rec.WakeTime, rec.DoneTime) {
+			rec.TotalLatency = rec.DoneTime.Sub(rec.WakeTime)
+			rec.TotalLatencyValid = true
+		} else {rec.TotalLatency = 0; rec.TotalLatencyValid = false}
+		
+		if checkValidTime(rec.TargetFireTime, rec.WakeTime) {
+			rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
+			rec.SchedulerDelayValid = true
+		} else {rec.SchedulerDelay = 0; rec.SchedulerDelayValid = false}
+
+		// // print first 10 results to stdout
+		// if rec != nil && rec.ID < 10 {
+		// 	fmt.Fprintf(os.Stderr, "Seq=%d Wake=%v Dispatch=%v GotConn=%v Wrote=%v FirstByte=%v Done=%v, Target Fire Time=%v\n",
+		// 		rec.ID,
+		// 		rec.WakeTime,
+		// 		rec.DispatchStart,
+		// 		rec.GotConnTime,
+		// 		rec.WroteReqTime,
+		// 		rec.FirstByteTime,
+		// 		rec.DoneTime,
+		// 		rec.TargetFireTime,
+		// 	)
+
+		// 	fmt.Fprintf(os.Stderr, "Seq=%d DispatchDelay=%v ConnDelay=%v WriteDelay=%v FirstByteRTT=%v FirstByteDelay=%v TotalLatency=%v SchedulerDelay=%v\n",
+		// 		rec.ID,
+		// 		rec.DispatchDelay,
+		// 		rec.ConnDelay,
+		// 		rec.WriteDelay,
+		// 		rec.FirstByteRTT,
+		// 		rec.FirstByteDelay,
+		// 		rec.TotalLatency,
+		// 		rec.SchedulerDelay,
+		// 	)
+
+		// }
 
 		// update the trace metrics in the attacker struct
 		if !dispatch.IsZero() {
