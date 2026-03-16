@@ -20,7 +20,8 @@ do
     echo "========================================"
 
     metrics_file="$OUT_DIR/metrics_rps_${rps}_delay_${DELAY}.csv"
-    echo "GET http://$HOST:$PORT/" | ./vegeta attack -rate=$rps -duration=$DURATION -workers=1 --metrics-csv="$metrics_file" --metrics-interval=$SAMPLING_INTERVAL | ./vegeta report -type=json > "$OUT_DIR/report_rps_${rps}_delay_${DELAY}.json"
+    window_file="$OUT_DIR/window_results_rps_${rps}_delay_${DELAY}.csv"
+    echo "GET http://$HOST:$PORT/" | ./vegeta attack -rate=$rps -duration=$DURATION -workers=1 --metrics-csv="$metrics_file" --window-csv="$window_file" --metrics-interval=$SAMPLING_INTERVAL | ./vegeta report -type=json > "$OUT_DIR/report_rps_${rps}_delay_${DELAY}.json"
 
     echo
     echo "Sleeping 5 seconds before next run..."
