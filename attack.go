@@ -63,14 +63,16 @@ func attackCmd() command {
 	fs.BoolVar(&opts.keepalive, "keepalive", true, "Use persistent connections")
 	fs.StringVar(&opts.unixSocket, "unix-socket", "", "Connect over a unix socket. This overrides the host address in target URLs")
 	fs.StringVar(&opts.promAddr, "prometheus-addr", "", "Prometheus exporter listen address [empty = disabled]. Example: 0.0.0.0:8880")
-	fs.StringVar(&opts.metricsCSV, "metrics-csv", "results.csv", "CSV file path for runtime attack metrics over time [empty = disabled]")
-	fs.StringVar(&opts.windowCSV, "window-csv", "window_results.csv", "CSV file path for windowed trace metrics [empty = disabled]")
-	fs.StringVar(&opts.baselineReferenceCSV, "baseline-reference-csv", "baseline_plots/baseline_reference.csv", "CSV file path for baseline Little's Law reference data [empty = disabled]")
-	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
-	fs.DurationVar(&opts.sampleInterval, "sample-interval", 100*time.Millisecond, "Sampling interval")
 	fs.Var(&dnsTTLFlag{&opts.dnsTTL}, "dns-ttl", "Cache DNS lookups for the given duration [-1 = disabled, 0 = forever]")
 	fs.BoolVar(&opts.sessionTickets, "session-tickets", false, "Enable TLS session resumption using session tickets")
 	fs.Var(&connectToFlag{&opts.connectTo}, "connect-to", "A mapping of (ip|host):port to use instead of a target URL's (ip|host):port. Can be repeated multiple times.\nIdentical src:port with different dst:port will round-robin over the different dst:port pairs.\nExample: google.com:80:localhost:6060")
+	// custom added flags
+	fs.StringVar(&opts.metricsCSV, "metrics-csv", "results.csv", "CSV file path for runtime attack metrics (e.g. workers, connections, in-flight, completions over time)")
+	fs.StringVar(&opts.windowCSV, "window-csv", "window_results.csv", "CSV file path for windowed trace metrics including delay & latency metrics, achieved rate, observed R, and Little's Law violation flag computed for each window")
+	fs.StringVar(&opts.baselineReferenceCSV, "baseline-reference-csv", "", "CSV file path for baseline Little's Law reference data; must be provided for Little's Law check to be performed")
+	fs.StringVar(&opts.referenceCSVPath, "reference-csv-path", "", "CSV file path for computed baseline latency for R metric computation")
+	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
+	fs.DurationVar(&opts.sampleInterval, "sample-interval", 100*time.Millisecond, "Sampling interval for windowed trace metrics (in-flight), must be less than or equal to metrics-interval")
 	systemSpecificFlags(fs, opts)
 
 	return command{fs, func(args []string) error {
@@ -120,6 +122,7 @@ type attackOpts struct {
 	baselineReferenceCSV string
 	metricsInterval      time.Duration
 	sampleInterval       time.Duration
+	referenceCSVPath     string
 	dnsTTL               time.Duration
 	sessionTickets       bool
 	connectTo            map[string][]string
@@ -129,60 +132,41 @@ type WindowStats struct {
 	Start time.Time
 	End   time.Time
 
-	Count int
+	ValidCount int
 
-	SumSchedulerDelay    time.Duration
-	SumDispatchDelay     time.Duration
-	SumConnDelay         time.Duration
-	SumWriteDelay        time.Duration
-	SumFirstByteRTT      time.Duration
-	SumFirstByteDelay    time.Duration
-	SumTotalLatency      time.Duration
-	SumSqSchedulerDelay  float64
-	SumSqDispatchDelay   float64
-	SumSqConnDelay       float64
-	SumSqWriteDelay      float64
-	SumSqFirstByteRTT    float64
-	SumSqFirstByteDelay  float64
-	SumSqTotalLatency    float64
-	SumInFlightSamples   float64
-	SumSqInFlightSamples float64
-	NumInFlightSamples   int64
+	SumSchedulerDelay  time.Duration
+	SumDispatchDelay   time.Duration
+	SumConnDelay       time.Duration
+	SumWriteDelay      time.Duration
+	SumFirstByteRTT    time.Duration
+	SumFirstByteDelay  time.Duration
+	SumTotalLatency    time.Duration
+	SumInFlightSamples float64
+	NumInFlightSamples int64
 }
 
 type windowSummary struct {
-	Count                int
-	Duration             time.Duration
-	AchievedRate         float64
-	AvgSchedulerDelay    time.Duration
-	StdDevSchedulerDelay time.Duration
-	AvgDispatchDelay     time.Duration
-	StdDevDispatchDelay  time.Duration
-	AvgConnDelay         time.Duration
-	StdDevConnDelay      time.Duration
-	AvgWriteDelay        time.Duration
-	StdDevWriteDelay     time.Duration
-	AvgFirstByteRTT      time.Duration
-	StdDevFirstByteRTT   time.Duration
-	AvgFirstByteDelay    time.Duration
-	StdDevFirstByteDelay time.Duration
-	AvgTotalLatency      time.Duration
-	StdDevTotalLatency   time.Duration
-	AvgInFlight          float64
-	StdDevInFlight       float64
-	LittleLawBaselineRPS float64
-	LittleLawLatency     time.Duration
-	LittleLawExpected    float64
-	LittleLawLower       float64
-	LittleLawUpper       float64
-	LittleLawViolation   bool
+	ValidCount         int
+	Duration           time.Duration
+	AchievedRate       float64
+	AvgSchedulerDelay  time.Duration
+	AvgDispatchDelay   time.Duration
+	AvgConnDelay       time.Duration
+	AvgWriteDelay      time.Duration
+	AvgFirstByteRTT    time.Duration
+	AvgFirstByteDelay  time.Duration
+	AvgTotalLatency    time.Duration
+	AvgInFlight        float64
+	ObservedR          float64
+	LittleLawViolation bool
 }
 
 type littleLawReference struct {
 	targetRPS       float64
 	baselineRPS     float64
 	baselineLatency time.Duration
-	maxInFlightStd  float64
+	p01NormalR      float64 // p01NormalR & p99NormalR are computed from reference-csv-path (referenceCSVPath)
+	p99NormalR      float64
 }
 
 // attack validates the attack arguments, sets up the
@@ -276,12 +260,27 @@ func attack(opts *attackOpts) (err error) {
 		go srv.ListenAndServe()
 	}
 
+	// loading the baseline reference CSV for Little's Law check if provided
 	var llRef *littleLawReference
+	targetRPS := targetRatePerSecond(opts.rate)
 	if opts.baselineReferenceCSV != "" && opts.rate.Freq > 0 {
-		llRef, err = loadLittleLawReference(opts.baselineReferenceCSV, targetRatePerSecond(opts.rate))
+		llRef, err = loadLittleLawReference(opts.baselineReferenceCSV, targetRPS)
 		if err != nil {
 			return err
 		}
+	}
+
+	// If a reference CSV is provided, use the average window latency from that
+	// file as the baseline latency for ObservedR calculations.
+	if opts.referenceCSVPath != "" && targetRPS > 0 {
+		baselineLatency, err := loadAverageLatencyFromReferenceCSV(opts.referenceCSVPath, targetRPS)
+		if err != nil {
+			return err
+		}
+		if llRef == nil {
+			llRef = &littleLawReference{targetRPS: targetRPS}
+		}
+		llRef.baselineLatency = baselineLatency
 	}
 
 	atk := vegeta.NewAttacker(
@@ -305,6 +304,7 @@ func attack(opts *attackOpts) (err error) {
 		vegeta.SessionTickets(opts.sessionTickets),
 	)
 
+	// setting up the CSV writers for runtime metrics and windowed trace metrics
 	var mw *metricsCSVWriter
 	if opts.metricsCSV != "" {
 		mw, err = newMetricsCSVWriter(opts.metricsCSV)
@@ -345,10 +345,11 @@ func processAttack(
 	sampleInterval time.Duration,
 	traces <-chan *vegeta.RequestRecord,
 ) error {
+
+	// creating tickers for runtime metrics and windowed trace metrics
 	if metricsInterval <= 0 {
 		metricsInterval = time.Second
 	}
-
 	ticker := time.NewTicker(metricsInterval)
 	defer ticker.Stop()
 
@@ -358,12 +359,7 @@ func processAttack(
 	sampleTicker := time.NewTicker(sampleInterval)
 	defer sampleTicker.Stop()
 
-	if mw != nil {
-		if err := mw.Write(atk.RuntimeMetrics()); err != nil {
-			return err
-		}
-	}
-
+	// initializing the window stats for the first interval
 	window := &WindowStats{Start: time.Now()}
 
 	for {
@@ -375,6 +371,7 @@ func processAttack(
 			}
 		case r, ok := <-res:
 			if !ok {
+				// write the final runtime metrics to the CSV file if provided
 				if mw != nil {
 					if err := mw.Write(atk.RuntimeMetrics()); err != nil {
 						return err
@@ -382,10 +379,14 @@ func processAttack(
 				}
 				res = nil
 				if res == nil && traces == nil {
+					// write the final windowed trace metrics to the CSV file if provided
 					window.End = time.Now()
-					if window.Count > 0 {
+					if window.ValidCount > 0 {
+						// compute the average metrics for the final window
 						summary := window.Summary()
+						applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last ticker tick
 						applyLittleLawCheck(&summary, llRef)
+						// write the final windowed trace metrics to the CSV file if provided
 						if ww != nil {
 							if err := ww.Write(window, summary); err != nil {
 								return err
@@ -394,6 +395,7 @@ func processAttack(
 					}
 					return nil
 				}
+				// continue to process any remaining traces as traces may still be coming
 				continue
 			}
 
@@ -409,9 +411,11 @@ func processAttack(
 			if !ok {
 				traces = nil
 				if res == nil && traces == nil {
+					// write the final windowed trace metrics to the CSV file if provided
 					window.End = time.Now()
-					if window.Count > 0 {
+					if window.ValidCount > 0 {
 						summary := window.Summary()
+						applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last ticker tick
 						applyLittleLawCheck(&summary, llRef)
 						if ww != nil {
 							if err := ww.Write(window, summary); err != nil {
@@ -421,18 +425,19 @@ func processAttack(
 					}
 					return nil
 				}
+				continue // continue to process any remaining results as results may still be coming
+			}
+
+			// update the window stats on receipt of a valid record only if none of the valids are False for rec
+			allTrue := rec.SchedulerDelayValid && rec.DispatchDelayValid &&
+				rec.ConnDelayValid && rec.WriteDelayValid &&
+				rec.FirstByteRTTValid && rec.FirstByteDelayValid &&
+				rec.TotalLatencyValid
+			if !allTrue {
 				continue
 			}
 
-			// update the window stats only if none of the valids are False for rec
-
-			all_true := rec.SchedulerDelayValid && rec.DispatchDelayValid && rec.ConnDelayValid && rec.WriteDelayValid && rec.FirstByteRTTValid && rec.FirstByteDelayValid && rec.TotalLatencyValid
-
-			if !all_true {
-				continue
-			}
-
-			window.Count++
+			window.ValidCount++
 			window.SumSchedulerDelay += rec.SchedulerDelay
 			window.SumDispatchDelay += rec.DispatchDelay
 			window.SumConnDelay += rec.ConnDelay
@@ -440,20 +445,12 @@ func processAttack(
 			window.SumFirstByteRTT += rec.FirstByteRTT
 			window.SumFirstByteDelay += rec.FirstByteDelay
 			window.SumTotalLatency += rec.TotalLatency
-			window.SumSqSchedulerDelay += durationSquare(rec.SchedulerDelay)
-			window.SumSqDispatchDelay += durationSquare(rec.DispatchDelay)
-			window.SumSqConnDelay += durationSquare(rec.ConnDelay)
-			window.SumSqWriteDelay += durationSquare(rec.WriteDelay)
-			window.SumSqFirstByteRTT += durationSquare(rec.FirstByteRTT)
-			window.SumSqFirstByteDelay += durationSquare(rec.FirstByteDelay)
-			window.SumSqTotalLatency += durationSquare(rec.TotalLatency)
 
 		case <-sampleTicker.C:
 			// sample the current runtime metrics and update the window stats
 			metrics := atk.RuntimeMetrics()
 			inFlight := float64(metrics.InFlight)
 			window.SumInFlightSamples += inFlight
-			window.SumSqInFlightSamples += inFlight * inFlight
 			window.NumInFlightSamples++
 
 		case <-ticker.C:
@@ -464,25 +461,14 @@ func processAttack(
 				}
 			}
 
+			// close the current window and compute the average metrics for the window on receipt of the ticker signal
 			window.End = time.Now()
 
 			// compute the average metrics for the window
-			if window.Count > 0 {
+			if window.ValidCount > 0 {
 				summary := window.Summary()
+				applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last sample ticker tick
 				applyLittleLawCheck(&summary, llRef)
-
-				// fmt.Fprintf(os.Stderr, "Window [%s - %s]: Count=%d, AvgSchedulerDelay=%s, StdDevSchedulerDelay=%s, AvgDispatchDelay=%s, StdDevDispatchDelay=%s, AvgConnDelay=%s, StdDevConnDelay=%s, AvgWriteDelay=%s, StdDevWriteDelay=%s, AvgFirstByteRTT=%s, StdDevFirstByteRTT=%s, AvgFirstByteDelay=%s, StdDevFirstByteDelay=%s, AvgTotalLatency=%s, StdDevTotalLatency=%s, AchievedRate=%.2f, AvgInFlight=%.2f, StdDevInFlight=%.2f\n",
-				// 	window.Start.Format(time.RFC3339Nano), window.End.Format(time.RFC3339Nano),
-				// 	summary.Count,
-				// 	summary.AvgSchedulerDelay, summary.StdDevSchedulerDelay,
-				// 	summary.AvgDispatchDelay, summary.StdDevDispatchDelay,
-				// 	summary.AvgConnDelay, summary.StdDevConnDelay,
-				// 	summary.AvgWriteDelay, summary.StdDevWriteDelay,
-				// 	summary.AvgFirstByteRTT, summary.StdDevFirstByteRTT,
-				// 	summary.AvgFirstByteDelay, summary.StdDevFirstByteDelay,
-				// 	summary.AvgTotalLatency, summary.StdDevTotalLatency,
-				// 	summary.AchievedRate, summary.AvgInFlight, summary.StdDevInFlight)
-
 				if ww != nil {
 					if err := ww.Write(window, summary); err != nil {
 						return err
@@ -499,36 +485,30 @@ func processAttack(
 
 func (w *WindowStats) Summary() windowSummary {
 	summary := windowSummary{
-		Count:    w.Count,
-		Duration: w.End.Sub(w.Start),
+		ValidCount: w.ValidCount,
+		Duration:   w.End.Sub(w.Start),
 	}
 
+	// compute valid achieved rate for the window
 	if summary.Duration > 0 {
-		summary.AchievedRate = float64(w.Count) / summary.Duration.Seconds()
+		summary.AchievedRate = float64(w.ValidCount) / summary.Duration.Seconds()
 	}
 
-	if w.Count > 0 {
-		n := float64(w.Count)
-		summary.AvgSchedulerDelay = w.SumSchedulerDelay / time.Duration(w.Count)
-		summary.StdDevSchedulerDelay = stdDevDuration(w.SumSchedulerDelay, w.SumSqSchedulerDelay, n)
-		summary.AvgDispatchDelay = w.SumDispatchDelay / time.Duration(w.Count)
-		summary.StdDevDispatchDelay = stdDevDuration(w.SumDispatchDelay, w.SumSqDispatchDelay, n)
-		summary.AvgConnDelay = w.SumConnDelay / time.Duration(w.Count)
-		summary.StdDevConnDelay = stdDevDuration(w.SumConnDelay, w.SumSqConnDelay, n)
-		summary.AvgWriteDelay = w.SumWriteDelay / time.Duration(w.Count)
-		summary.StdDevWriteDelay = stdDevDuration(w.SumWriteDelay, w.SumSqWriteDelay, n)
-		summary.AvgFirstByteRTT = w.SumFirstByteRTT / time.Duration(w.Count)
-		summary.StdDevFirstByteRTT = stdDevDuration(w.SumFirstByteRTT, w.SumSqFirstByteRTT, n)
-		summary.AvgFirstByteDelay = w.SumFirstByteDelay / time.Duration(w.Count)
-		summary.StdDevFirstByteDelay = stdDevDuration(w.SumFirstByteDelay, w.SumSqFirstByteDelay, n)
-		summary.AvgTotalLatency = w.SumTotalLatency / time.Duration(w.Count)
-		summary.StdDevTotalLatency = stdDevDuration(w.SumTotalLatency, w.SumSqTotalLatency, n)
+	// compute average metrics for the window
+	if w.ValidCount > 0 {
+		summary.AvgSchedulerDelay = w.SumSchedulerDelay / time.Duration(w.ValidCount)
+		summary.AvgDispatchDelay = w.SumDispatchDelay / time.Duration(w.ValidCount)
+		summary.AvgConnDelay = w.SumConnDelay / time.Duration(w.ValidCount)
+		summary.AvgWriteDelay = w.SumWriteDelay / time.Duration(w.ValidCount)
+		summary.AvgFirstByteRTT = w.SumFirstByteRTT / time.Duration(w.ValidCount)
+		summary.AvgFirstByteDelay = w.SumFirstByteDelay / time.Duration(w.ValidCount)
+		summary.AvgTotalLatency = w.SumTotalLatency / time.Duration(w.ValidCount)
 	}
 
 	if w.NumInFlightSamples > 0 {
+		// compute average in-flight for the window
 		n := float64(w.NumInFlightSamples)
 		summary.AvgInFlight = w.SumInFlightSamples / n
-		summary.StdDevInFlight = stdDevFloat(w.SumInFlightSamples, w.SumSqInFlightSamples, n)
 	}
 
 	return summary
@@ -542,12 +522,18 @@ func targetRatePerSecond(rate vegeta.Rate) float64 {
 }
 
 func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference, error) {
+	/*
+		Loads the baseline reference CSV for Little's Law check and returns the closest matching row to the target RPS
+	*/
+
+	// opening the provided CSV
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("error opening baseline reference CSV %s: %s", path, err)
 	}
 	defer f.Close()
 
+	// reading the CSV and validating its structure
 	rows, err := csv.NewReader(f).ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("error reading baseline reference CSV %s: %s", path, err)
@@ -556,12 +542,14 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 		return nil, fmt.Errorf("baseline reference CSV %s has no data rows", path)
 	}
 
+	// mapping the header columns to their indices
 	header := map[string]int{}
 	for i, col := range rows[0] {
 		header[col] = i
 	}
 
-	required := []string{"rps", "avg_total_latency_ms_mean", "avg_in_flight_std"}
+	// validating that the required columns are present in the CSV
+	required := []string{"rps", "avg_total_latency_ms_mean", "p01_normal_r", "p99_normal_r"}
 	for _, col := range required {
 		if _, ok := header[col]; !ok {
 			return nil, fmt.Errorf("baseline reference CSV %s is missing required column %q", path, col)
@@ -569,29 +557,34 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 	}
 
 	var (
-		best           *littleLawReference
-		bestDistance   = math.MaxFloat64
-		maxInFlightStd float64
+		best         *littleLawReference
+		bestDistance = math.MaxFloat64
+		bestp01R     float64
+		bestp99R     float64
 	)
 
 	for _, row := range rows[1:] {
+
+		// obtaining the RPS, average total latency, and average in-flight standard deviation from the CSV row
 		rps, err := strconv.ParseFloat(row[header["rps"]], 64)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing rps %q in %s: %s", row[header["rps"]], path, err)
 		}
+		// latency is the average across all the windows for the given RPS
 		latencyMS, err := strconv.ParseFloat(row[header["avg_total_latency_ms_mean"]], 64)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing avg_total_latency_ms_mean %q in %s: %s", row[header["avg_total_latency_ms_mean"]], path, err)
 		}
-		inFlightStd, err := strconv.ParseFloat(row[header["avg_in_flight_std"]], 64)
+		p01R, err := strconv.ParseFloat(row[header["p01_normal_r"]], 64)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing avg_in_flight_std %q in %s: %s", row[header["avg_in_flight_std"]], path, err)
+			return nil, fmt.Errorf("error parsing p01_normal_r %q in %s: %s", row[header["p01_normal_r"]], path, err)
+		}
+		p99R, err := strconv.ParseFloat(row[header["p99_normal_r"]], 64)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing p99_normal_r %q in %s: %s", row[header["p99_normal_r"]], path, err)
 		}
 
-		if inFlightStd > maxInFlightStd {
-			maxInFlightStd = inFlightStd
-		}
-
+		// distance from the target RPS to the current row's RPS
 		distance := math.Abs(rps - targetRPS)
 		if best == nil || distance < bestDistance {
 			best = &littleLawReference{
@@ -600,6 +593,8 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 				baselineLatency: time.Duration(latencyMS * float64(time.Millisecond)),
 			}
 			bestDistance = distance
+			bestp01R = p01R
+			bestp99R = p99R
 		}
 	}
 
@@ -607,64 +602,122 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 		return nil, fmt.Errorf("baseline reference CSV %s has no usable baseline rows", path)
 	}
 
-	best.maxInFlightStd = maxInFlightStd
+	best.p01NormalR = bestp01R
+	best.p99NormalR = bestp99R
 	return best, nil
 }
 
-func applyLittleLawCheck(summary *windowSummary, llRef *littleLawReference) {
+func loadAverageLatencyFromReferenceCSV(path string, targetRPS float64) (time.Duration, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("error opening reference CSV %s: %s", path, err)
+	}
+	defer f.Close()
+
+	rows, err := csv.NewReader(f).ReadAll()
+	if err != nil {
+		return 0, fmt.Errorf("error reading reference CSV %s: %s", path, err)
+	}
+	if len(rows) < 2 {
+		return 0, fmt.Errorf("reference CSV %s has no data rows", path)
+	}
+
+	header := map[string]int{}
+	for i, col := range rows[0] {
+		header[col] = i
+	}
+
+	latencyIdx, ok := header["avg_total_latency_ms"]
+	if !ok {
+		return 0, fmt.Errorf("reference CSV %s is missing required column %q", path, "avg_total_latency_ms")
+	}
+	countIdx, ok := header["count"]
+	if !ok {
+		return 0, fmt.Errorf("reference CSV %s is missing required column %q", path, "count")
+	}
+
+	var (
+		sum   float64
+		count int
+	)
+
+	minCount := 0.9 * targetRPS
+
+	// Average only rows whose observed count stays close to the requested RPS so the baseline reflects steady-state windows.
+	for _, row := range rows[1:] {
+		if latencyIdx >= len(row) || strings.TrimSpace(row[latencyIdx]) == "" {
+			continue
+		}
+		if countIdx >= len(row) || strings.TrimSpace(row[countIdx]) == "" {
+			continue
+		}
+		rowCount, err := strconv.ParseFloat(row[countIdx], 64)
+		if err != nil {
+			return 0, fmt.Errorf("error parsing count %q in %s: %s", row[countIdx], path, err)
+		}
+		if rowCount <= minCount {
+			continue
+		}
+		latencyMS, err := strconv.ParseFloat(row[latencyIdx], 64)
+		if err != nil {
+			return 0, fmt.Errorf("error parsing avg_total_latency_ms %q in %s: %s", row[latencyIdx], path, err)
+		}
+		sum += latencyMS
+		count++
+	}
+
+	if count == 0 {
+		return 0, fmt.Errorf("reference CSV %s has no usable avg_total_latency_ms values with count > 90%% of target RPS", path)
+	}
+
+	return time.Duration((sum / float64(count)) * float64(time.Millisecond)), nil
+}
+
+func applyObservedR(summary *windowSummary, llRef *littleLawReference) {
 	if llRef == nil {
+		summary.ObservedR = math.NaN()
 		return
 	}
 
-	expected := llRef.targetRPS * llRef.baselineLatency.Seconds()
-	lower := expected - max(2*llRef.maxInFlightStd, 0.0)
-	upper := expected + max(2*llRef.maxInFlightStd, 0.0)
+	inflightExpected := llRef.targetRPS * llRef.baselineLatency.Seconds()
+	if inflightExpected <= 0 {
+		summary.ObservedR = math.NaN()
+		return
+	}
 
-	summary.LittleLawBaselineRPS = llRef.baselineRPS
-	summary.LittleLawLatency = llRef.baselineLatency
-	summary.LittleLawExpected = expected
-	summary.LittleLawLower = lower
-	summary.LittleLawUpper = upper
-	summary.LittleLawViolation = summary.AvgInFlight < lower || summary.AvgInFlight > upper
+	summary.ObservedR = summary.AvgInFlight / inflightExpected
+}
+
+func applyLittleLawCheck(summary *windowSummary, llRef *littleLawReference) {
+	if llRef == nil || math.IsNaN(summary.ObservedR) {
+		return
+	}
+
+	lower := llRef.p01NormalR
+	upper := llRef.p99NormalR
+
+	summary.LittleLawViolation = summary.ObservedR < lower || summary.ObservedR > upper
 
 	if summary.LittleLawViolation {
 		fmt.Fprintf(
 			os.Stderr,
-			"Little's Law violation: observed avg_in_flight=%.6f outside [%.6f, %.6f] (expected=%.6f, target_rps=%.2f, baseline_rps=%.0f, baseline_avg_total_latency=%s)\n",
-			summary.AvgInFlight,
+			"Little's Law violation: observed R=%.6f outside [%.6f, %.6f]\n",
+			summary.ObservedR,
 			lower,
 			upper,
-			expected,
-			llRef.targetRPS,
-			llRef.baselineRPS,
-			llRef.baselineLatency,
+		)
+	} else {
+		fmt.Fprintf(
+			os.Stderr,
+			"Little's Law check passed: observed R=%.6f within [%.6f, %.6f]\n",
+			summary.ObservedR,
+			lower,
+			upper,
 		)
 	}
 }
 
-func durationSquare(d time.Duration) float64 {
-	v := float64(d)
-	return v * v
-}
-
-func stdDevDuration(sum time.Duration, sumSq float64, count float64) time.Duration {
-	return time.Duration(stdDevFloat(float64(sum), sumSq, count))
-}
-
-func stdDevFloat(sum float64, sumSq float64, count float64) float64 {
-	if count <= 0 {
-		return 0
-	}
-
-	mean := sum / count
-	variance := (sumSq / count) - (mean * mean)
-	if variance < 0 {
-		variance = 0
-	}
-
-	return math.Sqrt(variance)
-}
-
+// defining writer structs for metrics CSV and windowed trace CSV
 type metricsCSVWriter struct {
 	file      *os.File
 	csv       *csv.Writer
@@ -677,6 +730,8 @@ type windowCSVWriter struct {
 }
 
 func newWindowCSVWriter(path string) (*windowCSVWriter, error) {
+
+	// creating the CSV file for windowed trace metrics and writing the header row
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
@@ -688,28 +743,16 @@ func newWindowCSVWriter(path string) (*windowCSVWriter, error) {
 		"window_end",
 		"window_duration_ms",
 		"count",
-		"achieved_rate",
+		"valid_achieved_rate",
 		"avg_scheduler_delay_ms",
-		"stddev_scheduler_delay_ms",
 		"avg_dispatch_delay_ms",
-		"stddev_dispatch_delay_ms",
 		"avg_conn_delay_ms",
-		"stddev_conn_delay_ms",
 		"avg_write_delay_ms",
-		"stddev_write_delay_ms",
 		"avg_first_byte_rtt_ms",
-		"stddev_first_byte_rtt_ms",
 		"avg_first_byte_delay_ms",
-		"stddev_first_byte_delay_ms",
 		"avg_total_latency_ms",
-		"stddev_total_latency_ms",
 		"avg_in_flight",
-		"stddev_in_flight",
-		"ll_baseline_rps",
-		"ll_baseline_avg_total_latency_ms",
-		"ll_expected_in_flight",
-		"ll_lower_in_flight",
-		"ll_upper_in_flight",
+		"observed_R",
 		"ll_violation",
 	}); err != nil {
 		f.Close()
@@ -738,29 +781,17 @@ func (w *windowCSVWriter) Write(window *WindowStats, summary windowSummary) erro
 		window.Start.UTC().Format(time.RFC3339Nano),
 		window.End.UTC().Format(time.RFC3339Nano),
 		strconv.FormatFloat(float64(summary.Duration)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.Itoa(summary.Count),
+		strconv.Itoa(summary.ValidCount),
 		strconv.FormatFloat(summary.AchievedRate, 'f', 6, 64),
 		strconv.FormatFloat(float64(summary.AvgSchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevSchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgDispatchDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevDispatchDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgConnDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevConnDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgWriteDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevWriteDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgFirstByteRTT)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevFirstByteRTT)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgFirstByteDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevFirstByteDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgTotalLatency)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.StdDevTotalLatency)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(summary.AvgInFlight, 'f', 6, 64),
-		strconv.FormatFloat(summary.StdDevInFlight, 'f', 6, 64),
-		strconv.FormatFloat(summary.LittleLawBaselineRPS, 'f', 3, 64),
-		strconv.FormatFloat(float64(summary.LittleLawLatency)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(summary.LittleLawExpected, 'f', 6, 64),
-		strconv.FormatFloat(summary.LittleLawLower, 'f', 6, 64),
-		strconv.FormatFloat(summary.LittleLawUpper, 'f', 6, 64),
+		strconv.FormatFloat(summary.ObservedR, 'f', 6, 64),
 		strconv.FormatBool(summary.LittleLawViolation),
 	}
 	if err := w.csv.Write(rec); err != nil {
@@ -771,6 +802,8 @@ func (w *windowCSVWriter) Write(window *WindowStats, summary windowSummary) erro
 }
 
 func newMetricsCSVWriter(path string) (*metricsCSVWriter, error) {
+
+	// creating the CSV file for runtime metrics and writing the header row
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
@@ -782,15 +815,8 @@ func newMetricsCSVWriter(path string) (*metricsCSVWriter, error) {
 		"elapsed_ms",
 		"workers",
 		"connections",
-		"send_delay_ms",
 		"in_flight",
 		"completions",
-		"scheduler_delay_ms",
-		"conn_delay_ms",
-		"write_delay_ms",
-		"first_byte_rtt_ms",
-		"first_byte_delay_ms",
-		"total_latency_ms",
 	}); err != nil {
 		f.Close()
 		return nil, err
@@ -824,15 +850,8 @@ func (m *metricsCSVWriter) Write(metrics vegeta.RuntimeMetrics) error {
 		strconv.FormatInt(elapsedMS, 10),
 		strconv.FormatUint(metrics.Workers, 10),
 		strconv.FormatUint(metrics.Connections, 10),
-		strconv.FormatFloat(float64(metrics.SendDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatUint(metrics.InFlight, 10),
 		strconv.FormatUint(metrics.Completions, 10),
-		strconv.FormatFloat(float64(metrics.SchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(metrics.ConnDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(metrics.WriteDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(metrics.FirstByteRTT)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(metrics.FirstByteDelay)/float64(time.Millisecond), 'f', 3, 64),
-		strconv.FormatFloat(float64(metrics.TotalLatency)/float64(time.Millisecond), 'f', 3, 64),
 	}
 	if err := m.csv.Write(rec); err != nil {
 		return err

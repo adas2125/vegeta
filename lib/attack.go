@@ -37,15 +37,8 @@ type Attacker struct {
 
 	currentWorkers      int64
 	activeConns         int64
-	sendDelayNanos      int64
 	inFlight            int64
-	schedulerDelay      int64
 	completions         int64
-	traceConnDelay      int64
-	traceWriteDelay     int64
-	traceFirstByteRTT   int64
-	traceFirstByteDelay int64
-	traceTotalLatency   int64
 	traceCh             chan *RequestRecord
 }
 
@@ -111,15 +104,8 @@ type RuntimeMetrics struct {
 	Timestamp      time.Time
 	Workers        uint64
 	Connections    uint64
-	SendDelay      time.Duration
 	InFlight       uint64
 	Completions    uint64
-	SchedulerDelay time.Duration
-	ConnDelay      time.Duration
-	WriteDelay     time.Duration
-	FirstByteRTT   time.Duration
-	FirstByteDelay time.Duration
-	TotalLatency   time.Duration
 }
 
 type FireEvent struct {
@@ -546,24 +532,15 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 				return
 			}
 
-			atomic.StoreInt64(&a.sendDelayNanos, sendDelayNanos(p, elapsed, count))
-
 			wait, stop := p.Pace(elapsed, count)
 			if stop {
 				return
 			}
 
-			// measure scheduler delay
+			// target: the time at which the request should be fired
 			beforeSleep := time.Now()
 			target := beforeSleep.Add(wait)
 			time.Sleep(wait)
-			wake := time.Now()
-			schedulerDelay := wake.Sub(target)
-			if schedulerDelay < 0 {
-				schedulerDelay = 0
-			}
-
-			atomic.StoreInt64(&a.schedulerDelay, int64(schedulerDelay))
 
 			if workers < a.maxWorkers {
 				select {
@@ -593,58 +570,6 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 	return results
 }
 
-func sendDelayNanos(p Pacer, elapsed time.Duration, hits uint64) int64 {
-	var expectedHits float64
-	switch p := p.(type) {
-	case ConstantPacer:
-		if p.Per <= 0 || p.Freq <= 0 {
-			return 0
-		}
-		expectedHits = float64(p.Freq) * float64(elapsed) / float64(p.Per)
-	case *ConstantPacer:
-		if p == nil || p.Per <= 0 || p.Freq <= 0 {
-			return 0
-		}
-		expectedHits = float64(p.Freq) * float64(elapsed) / float64(p.Per)
-	case LinearPacer:
-		expectedHits = p.hits(elapsed)
-	case *LinearPacer:
-		if p == nil {
-			return 0
-		}
-		expectedHits = p.hits(elapsed)
-	case SinePacer:
-		expectedHits = p.hits(elapsed)
-	case *SinePacer:
-		if p == nil {
-			return 0
-		}
-		expectedHits = p.hits(elapsed)
-	default:
-		return 0
-	}
-
-	deficit := expectedHits - float64(hits)
-	if deficit <= 0 {
-		return 0
-	}
-
-	rate := p.Rate(elapsed)
-	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
-		return 0
-	}
-
-	delayNanos := deficit * (1e9 / rate)
-	if delayNanos <= 0 || math.IsNaN(delayNanos) || math.IsInf(delayNanos, 0) {
-		return 0
-	}
-	if delayNanos > float64(math.MaxInt64) {
-		return math.MaxInt64
-	}
-
-	return int64(delayNanos)
-}
-
 // Stop stops the current attack. The return value indicates whether this call
 // has signalled the attack to stop (`true` for the first call) or whether it
 // was a noop because it has been previously signalled to stop (`false` for any
@@ -670,14 +595,18 @@ func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, tic
 		// create a new RequestRecord for this request
 		rec := &RequestRecord{}
 		rec.TargetFireTime = fire.TargetFireTime
-		rec.WakeTime = time.Now()
+		rec.WakeTime = time.Now()	// record the time when the worker wakes up to process the request
 
 		res := a.hit(tr, atk, rec)
 
-		// update inflgiht and completions, add the result
+		// update inflight, completions, add the result
 		atomic.AddInt64(&a.inFlight, -1)
 		atomic.AddInt64(&a.completions, 1)
-		a.traceCh <- rec
+		select {
+		case a.traceCh <- rec:
+		default:
+			// drop trace record if consumer is behind
+		}
 		results <- res
 	}
 }
@@ -700,48 +629,13 @@ func (a *Attacker) RuntimeMetrics() RuntimeMetrics {
 	if completions < 0 {
 		completions = 0
 	}
-	delayNanos := atomic.LoadInt64(&a.sendDelayNanos)
-	if delayNanos < 0 {
-		delayNanos = 0
-	}
-	schedulerDelay := atomic.LoadInt64(&a.schedulerDelay)
-	if schedulerDelay < 0 {
-		schedulerDelay = 0
-	}
-	connDelay := atomic.LoadInt64(&a.traceConnDelay)
-	if connDelay < 0 {
-		connDelay = 0
-	}
-	writeDelay := atomic.LoadInt64(&a.traceWriteDelay)
-	if writeDelay < 0 {
-		writeDelay = 0
-	}
-	firstByteRTT := atomic.LoadInt64(&a.traceFirstByteRTT)
-	if firstByteRTT < 0 {
-		firstByteRTT = 0
-	}
-	firstByteDelay := atomic.LoadInt64(&a.traceFirstByteDelay)
-	if firstByteDelay < 0 {
-		firstByteDelay = 0
-	}
-	totalLatency := atomic.LoadInt64(&a.traceTotalLatency)
-	if totalLatency < 0 {
-		totalLatency = 0
-	}
 
 	return RuntimeMetrics{
 		Timestamp:      time.Now(),
 		Workers:        uint64(workers),
 		Connections:    uint64(connections),
-		SendDelay:      time.Duration(delayNanos),
 		InFlight:       uint64(inFlight),
 		Completions:    uint64(completions),
-		SchedulerDelay: time.Duration(schedulerDelay),
-		ConnDelay:      time.Duration(connDelay),
-		WriteDelay:     time.Duration(writeDelay),
-		FirstByteRTT:   time.Duration(firstByteRTT),
-		FirstByteDelay: time.Duration(firstByteDelay),
-		TotalLatency:   time.Duration(totalLatency),
 	}
 }
 
@@ -754,7 +648,9 @@ func (a *Attacker) trackDialContext(dial func(context.Context, string, string) (
 		if _, ok := conn.(*trackedConn); ok {
 			return conn, nil
 		}
+		// increment active connections
 		atomic.AddInt64(&a.activeConns, 1)
+		// returns a trackedConn that embeds the original connection and decrements the active connections counter when closed
 		return &trackedConn{
 			Conn: conn,
 			onClose: func() {
@@ -771,6 +667,7 @@ type trackedConn struct {
 }
 
 func (c *trackedConn) Close() error {
+	/* Overrides net.Conn's Close method */
 	err := c.Conn.Close()
 	c.once.Do(c.onClose)
 	return err
@@ -818,100 +715,53 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 	rec.ID = res.Seq
 
 	defer func() {
-		traceMu.Lock()
-		dispatch := tDispatch
-		gotConn := tGotConn
-		wroteReq := tWroteReq
-		firstByte := tFirstByte
-		traceMu.Unlock()
 
 		tDone := time.Now()
 
-		// update record & add to result
+		// update record
 		rec.DoneTime = tDone
-		// if !rec.DispatchStart.IsZero() && !rec.WakeTime.IsZero() && !rec.DispatchStart.Before(rec.WakeTime) {
-		// 	rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
-		// } else {
-		// 	rec.DispatchDelay = 0
-		// }
-
 		if checkValidTime(rec.WakeTime, rec.DispatchStart) {
+			// dispatch delay: the time between when the worker wakes up to process the request and when it actually makes the HTTP request (dispatch start)
 			rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
 			rec.DispatchDelayValid = true
 		} else {rec.DispatchDelay = 0; rec.DispatchDelayValid = false}
-
+		
 		if checkValidTime(rec.DispatchStart, rec.GotConnTime) {
+			// connection delay: the time between when the HTTP request is dispatched and when a connection is obtained
 			rec.ConnDelay = rec.GotConnTime.Sub(rec.DispatchStart)
 			rec.ConnDelayValid = true
 		} else {rec.ConnDelay = 0; rec.ConnDelayValid = false}
-
+		
 		if checkValidTime(rec.GotConnTime, rec.WroteReqTime) {
+			// write delay: how long it took for the client to write the request after obtaining a connection
 			rec.WriteDelay = rec.WroteReqTime.Sub(rec.GotConnTime)
 			rec.WriteDelayValid = true
 		} else {rec.WriteDelay = 0; rec.WriteDelayValid = false}
-
+		
 		if checkValidTime(rec.WroteReqTime, rec.FirstByteTime) {
+			// first byte RTT: the time between when the request was written and when the first byte of the response was received
 			rec.FirstByteRTT = rec.FirstByteTime.Sub(rec.WroteReqTime)
 			rec.FirstByteRTTValid = true
 		} else {rec.FirstByteRTT = 0; rec.FirstByteRTTValid = false}
-
+		
 		if checkValidTime(rec.DispatchStart, rec.FirstByteTime) {
+			// first byte delay: the time between when the request was dispatched (start of the request) and when the first byte of the response was received
 			rec.FirstByteDelay = rec.FirstByteTime.Sub(rec.DispatchStart)
 			rec.FirstByteDelayValid = true
 		} else {rec.FirstByteDelay = 0; rec.FirstByteDelayValid = false}
-
+		
 		if checkValidTime(rec.WakeTime, rec.DoneTime) {
+			// total latency: the time between when the worker wakes up to process the request and when the request is fully completed (response received)
 			rec.TotalLatency = rec.DoneTime.Sub(rec.WakeTime)
 			rec.TotalLatencyValid = true
 		} else {rec.TotalLatency = 0; rec.TotalLatencyValid = false}
 		
 		if checkValidTime(rec.TargetFireTime, rec.WakeTime) {
+			// scheduler delay: the time between when the request was scheduled to be fired and when the worker actually woke up to process it
 			rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
 			rec.SchedulerDelayValid = true
 		} else {rec.SchedulerDelay = 0; rec.SchedulerDelayValid = false}
 
-		// // print first 10 results to stdout
-		// if rec != nil && rec.ID < 10 {
-		// 	fmt.Fprintf(os.Stderr, "Seq=%d Wake=%v Dispatch=%v GotConn=%v Wrote=%v FirstByte=%v Done=%v, Target Fire Time=%v\n",
-		// 		rec.ID,
-		// 		rec.WakeTime,
-		// 		rec.DispatchStart,
-		// 		rec.GotConnTime,
-		// 		rec.WroteReqTime,
-		// 		rec.FirstByteTime,
-		// 		rec.DoneTime,
-		// 		rec.TargetFireTime,
-		// 	)
-
-		// 	fmt.Fprintf(os.Stderr, "Seq=%d DispatchDelay=%v ConnDelay=%v WriteDelay=%v FirstByteRTT=%v FirstByteDelay=%v TotalLatency=%v SchedulerDelay=%v\n",
-		// 		rec.ID,
-		// 		rec.DispatchDelay,
-		// 		rec.ConnDelay,
-		// 		rec.WriteDelay,
-		// 		rec.FirstByteRTT,
-		// 		rec.FirstByteDelay,
-		// 		rec.TotalLatency,
-		// 		rec.SchedulerDelay,
-		// 	)
-
-		// }
-
-		// update the trace metrics in the attacker struct
-		if !dispatch.IsZero() {
-			atomic.StoreInt64(&a.traceTotalLatency, int64(tDone.Sub(dispatch)))
-			if !gotConn.IsZero() {
-				atomic.StoreInt64(&a.traceConnDelay, int64(gotConn.Sub(dispatch)))
-				if !wroteReq.IsZero() {
-					atomic.StoreInt64(&a.traceWriteDelay, int64(wroteReq.Sub(gotConn)))
-				}
-				if !firstByte.IsZero() && !wroteReq.IsZero() {
-					atomic.StoreInt64(&a.traceFirstByteRTT, int64(firstByte.Sub(wroteReq)))
-				}
-			}
-			if !wroteReq.IsZero() && !firstByte.IsZero() {
-				atomic.StoreInt64(&a.traceFirstByteDelay, int64(firstByte.Sub(dispatch)))
-			}
-		}
 		res.Latency = time.Since(res.Timestamp)
 		if err != nil {
 			res.Error = err.Error()
