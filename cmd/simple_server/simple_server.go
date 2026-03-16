@@ -30,38 +30,38 @@ func main() {
 
 	flag.Parse()
 
-	file, err := os.Create("output.csv")
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
+	// file, err := os.Create("output.csv")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer file.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
+	// writer := csv.NewWriter(file)
+	// defer writer.Flush()
 
 	var totalCount uint64
-	var mu sync.Mutex
+	// var mu sync.Mutex
 
 	// RNG seeded once
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	_ = writer.Write([]string{"timestamp", "total_requests"})
-	writer.Flush()
+	// _ = writer.Write([]string{"timestamp", "total_requests"})
+	// writer.Flush()
 
-	go func() {
-		for {
-			time.Sleep(1 * time.Second)
-			current := atomic.LoadUint64(&totalCount)
+	// go func() {
+	// 	for {
+	// 		time.Sleep(1 * time.Second)
+	// 		current := atomic.LoadUint64(&totalCount)
 
-			mu.Lock()
-			_ = writer.Write([]string{
-				time.Now().Format(time.RFC3339),
-				fmt.Sprintf("%d", current),
-			})
-			writer.Flush()
-			mu.Unlock()
-		}
-	}()
+	// 		mu.Lock()
+	// 		_ = writer.Write([]string{
+	// 			time.Now().Format(time.RFC3339),
+	// 			fmt.Sprintf("%d", current),
+	// 		})
+	// 		writer.Flush()
+	// 		mu.Unlock()
+	// 	}
+	// }()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		d := sampleDelay(rng, *delayMode, *delay, *minDelay, *maxDelay, *meanDelay)
