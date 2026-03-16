@@ -1,13 +1,14 @@
 package main
 
 import (
-	"encoding/csv"
+	// "encoding/csv"
 	"flag"
 	"fmt"
 	"math/rand"
 	"net/http"
-	"os"
-	"sync"
+
+	// "os"
+	// "sync"
 	"sync/atomic"
 	"time"
 )
