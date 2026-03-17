@@ -243,12 +243,17 @@ func attack(opts *attackOpts) (err error) {
 	}
 
 	var pm *prom.Metrics
+	var dm *prom.DiagnosticMetrics
 	if opts.promAddr != "" {
 		pm = prom.NewMetrics()
+		dm = prom.NewDiagnosticMetrics()
 
 		r := prometheus.NewRegistry()
 		if err := pm.Register(r); err != nil {
 			return fmt.Errorf("error registering prometheus metrics: %s", err)
+		}
+		if err := dm.Register(r); err != nil {
+			return fmt.Errorf("error registering diagnostic metrics: %s", err)
 		}
 
 		srv := http.Server{
@@ -329,7 +334,7 @@ func attack(opts *attackOpts) (err error) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	return processAttack(atk, res, enc, sig, pm, mw, ww, llRef, opts.metricsInterval, opts.sampleInterval, traces)
+	return processAttack(atk, res, enc, sig, pm, dm, mw, ww, llRef, opts.metricsInterval, opts.sampleInterval, traces)
 }
 
 func processAttack(
@@ -338,6 +343,7 @@ func processAttack(
 	enc vegeta.Encoder,
 	sig <-chan os.Signal,
 	pm *prom.Metrics,
+	dm *prom.DiagnosticMetrics,
 	mw *metricsCSVWriter,
 	ww *windowCSVWriter,
 	llRef *littleLawReference,
@@ -454,11 +460,15 @@ func processAttack(
 			window.NumInFlightSamples++
 
 		case <-ticker.C:
-			// whenever the ticker fires, write the current runtime metrics to the CSV file
+			// whenever the ticker fires, snapshot runtime metrics and write to CSV / Prometheus
+			rm := atk.RuntimeMetrics()
 			if mw != nil {
-				if err := mw.Write(atk.RuntimeMetrics()); err != nil {
+				if err := mw.Write(rm); err != nil {
 					return err
 				}
+			}
+			if dm != nil {
+				dm.ObserveRuntime(rm.Workers, rm.Connections, rm.InFlight, rm.Completions)
 			}
 
 			// close the current window and compute the average metrics for the window on receipt of the ticker signal
@@ -473,6 +483,21 @@ func processAttack(
 					if err := ww.Write(window, summary); err != nil {
 						return err
 					}
+				}
+				if dm != nil {
+					dm.ObserveWindow(
+						summary.AchievedRate,
+						msFloat(summary.AvgSchedulerDelay),
+						msFloat(summary.AvgDispatchDelay),
+						msFloat(summary.AvgConnDelay),
+						msFloat(summary.AvgWriteDelay),
+						msFloat(summary.AvgFirstByteRTT),
+						msFloat(summary.AvgFirstByteDelay),
+						msFloat(summary.AvgTotalLatency),
+						summary.AvgInFlight,
+						summary.ObservedR,
+						summary.LittleLawViolation,
+					)
 				}
 			}
 
@@ -512,6 +537,11 @@ func (w *WindowStats) Summary() windowSummary {
 	}
 
 	return summary
+}
+
+// msFloat converts a time.Duration to a float64 number of milliseconds.
+func msFloat(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
 }
 
 func targetRatePerSecond(rate vegeta.Rate) float64 {
