@@ -2,18 +2,16 @@
 set -euo pipefail
 
 URL="POST http://localhost:8080/"
-DURATION="30s"
-WARMUP_DURATION="10s"
+DURATION="10s"
 
 # RPS bands
-RATES=(1000 4000 7000 10000)
+RATES=(1000 2000 4000 8000 12000)
 FIXED_WORKERS=150
 
 # runs per band
-RUNS=3
+RUNS=15
 
 # cooldowns
-WARMUP_COOLDOWN=10
 RUN_COOLDOWN=10
 
 # output dirs
@@ -26,24 +24,6 @@ timestamp() {
   date +"%Y-%m-%d %H:%M:%S"
 }
 
-run_warmup() {
-  local RATE="$1"
-
-  echo "[$(timestamp)] --------------------------------------"
-  echo "[$(timestamp)] Warmup run for RATE=$RATE"
-  echo "[$(timestamp)] --------------------------------------"
-
-  echo "$URL" | ./vegeta attack \
-    -rate="$RATE" \
-    -duration="$WARMUP_DURATION" \
-    -workers="$FIXED_WORKERS" \
-    -max-workers="$FIXED_WORKERS" \
-    > /dev/null
-
-  echo "[$(timestamp)] Warmup complete for RATE=$RATE"
-  echo "[$(timestamp)] Cooling down for ${WARMUP_COOLDOWN}s"
-  sleep "$WARMUP_COOLDOWN"
-}
 
 # --------------------------------------
 # Phase 1: Generate per-RPS reference CSVs
@@ -52,8 +32,6 @@ for RATE in "${RATES[@]}"; do
   echo "[$(timestamp)] ======================================"
   echo "[$(timestamp)] Generating reference CSV for RATE=$RATE"
   echo "[$(timestamp)] ======================================"
-
-  run_warmup "$RATE"
 
   echo "$URL" | ./vegeta attack \
     -rate="$RATE" \
@@ -76,8 +54,6 @@ for RATE in "${RATES[@]}"; do
     echo "[$(timestamp)] ======================================"
     echo "[$(timestamp)] Running baseline RATE=$RATE RUN=$RUN"
     echo "[$(timestamp)] ======================================"
-
-    run_warmup "$RATE"
 
     echo "$URL" | ./vegeta attack \
       -rate="$RATE" \

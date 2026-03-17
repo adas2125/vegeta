@@ -16,6 +16,10 @@ The overall flow is:
 
 The implementation below keeps the logic straightforward and favors explicit
 dataframe transformations so it is easy to inspect intermediate outputs.
+
+Usage example:
+    python3 plot_baselines.py --drop-last-window
+
 """
 
 import argparse
@@ -32,12 +36,9 @@ FILENAME_RE = re.compile(r".*rps(\d+)_run(\d+)\.csv$")
 # Smaller subset used when building the exported reference CSV and when
 # comparing a new run against the nearest baseline.
 PRIMARY_BASELINE_METRICS = [
-    "valid_achieved_rate",
-    "avg_scheduler_delay_ms",
-    "avg_conn_delay_ms",
-    "avg_first_byte_rtt_ms",
-    "avg_total_latency_ms",
-    "avg_in_flight",
+    "valid_achieved_rate", "avg_scheduler_delay_ms",
+    "avg_conn_delay_ms", "avg_first_byte_rtt_ms",
+    "avg_total_latency_ms", "avg_in_flight",
 ]
 
 # Human-friendly axis labels for the generated plots.
@@ -60,7 +61,7 @@ def parse_args():
     p.add_argument("--input-dir", type=str, default="baseline_ref")
     p.add_argument("--output-dir", type=str, default="baseline_plots")
     p.add_argument("--warmup-windows", type=int, default=2)
-    p.add_argument("--drop-last-window", type=bool, default=True)
+    p.add_argument("--drop-last-window", action="store_true")
     p.add_argument("--duration-threshold-frac", type=float, default=0.8)
     return p.parse_args()
 
@@ -223,8 +224,6 @@ def build_rps_summary_from_windows(window_df: pd.DataFrame) -> pd.DataFrame:
 
             record[f"{metric}_mean"] = mean
             record[f"{metric}_std"] = std
-            record[f"{metric}_p99"] = vals.quantile(0.99)
-            record[f"{metric}_p01"] = vals.quantile(0.01)
 
         if "observed_R" in grp.columns:
             observed_r_vals = grp["observed_R"].dropna()
@@ -293,37 +292,18 @@ def main():
     window_df = build_window_level_table(input_dir, args)
     rps_summary_df = build_rps_summary_from_windows(window_df)
 
-    # Export only the subset of columns that downstream tooling needs from the
-    # larger per-RPS summary table.
-    baseline_reference_cols = ["rps", "num_runs", "num_windows"]
-    for metric in PRIMARY_BASELINE_METRICS:
-        for suffix in ["mean", "std", "lower_2std", "upper_2std"]:
-            col = f"{metric}_{suffix}"
-            if col in rps_summary_df.columns:
-                baseline_reference_cols.append(col)
-
-    for extra in ["expected_inflight_ll", "inflight_gap_vs_ll", "avg_in_flight_p99", "inflight_p99_gap_vs_ll", "p01_normal_r", "p99_normal_r"]:
-        if extra in rps_summary_df.columns:
-            baseline_reference_cols.append(extra)
-
-    baseline_reference_df = rps_summary_df[baseline_reference_cols].copy()
-
-    # Save all useful intermediate and final tables so the aggregation pipeline
-    # is easy to inspect without re-running the script in a debugger.
+    # Save the final tables
     run_df.to_csv(output_dir / "run_level_summary.csv", index=False)
     window_df.to_csv(output_dir / "window_level_trimmed.csv", index=False)
-    rps_summary_df.to_csv(output_dir / "rps_level_summary.csv", index=False)
-    baseline_reference_df.to_csv(output_dir / "baseline_reference.csv", index=False)
+    rps_summary_df.to_csv(output_dir / "baseline_reference.csv", index=False)
 
     # Generate one PNG per metric for quick visual inspection.
     for metric in METRICS_TO_PLOT.keys():
         plot_metric(run_df, rps_summary_df, metric, output_dir)
 
     print(f"Saved plots and summaries to: {output_dir}")
-    print(f"Run-level summary: {output_dir / 'run_level_summary.csv'}")
-    print(f"Window-level trimmed: {output_dir / 'window_level_trimmed.csv'}")
-    print(f"RPS-level summary: {output_dir / 'rps_level_summary.csv'}")
-    print(f"Baseline reference: {output_dir / 'baseline_reference.csv'}")
+
+
 
 if __name__ == "__main__":
     main()
