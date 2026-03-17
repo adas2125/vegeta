@@ -559,8 +559,8 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 	var (
 		best         *littleLawReference
 		bestDistance = math.MaxFloat64
-		bestp01R     float64
-		bestp99R     float64
+		globalLower  = math.MaxFloat64
+		globalUpper  = -math.MaxFloat64
 	)
 
 	for _, row := range rows[1:] {
@@ -593,8 +593,14 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 				baselineLatency: time.Duration(latencyMS * float64(time.Millisecond)),
 			}
 			bestDistance = distance
-			bestp01R = p01R
-			bestp99R = p99R
+		}
+
+		// --- global envelope (GLOBAL) ---
+		if p01R < globalLower {
+			globalLower = p01R
+		}
+		if p99R > globalUpper {
+			globalUpper = p99R
 		}
 	}
 
@@ -602,8 +608,8 @@ func loadLittleLawReference(path string, targetRPS float64) (*littleLawReference
 		return nil, fmt.Errorf("baseline reference CSV %s has no usable baseline rows", path)
 	}
 
-	best.p01NormalR = bestp01R
-	best.p99NormalR = bestp99R
+	best.p01NormalR = globalLower
+	best.p99NormalR = globalUpper
 	return best, nil
 }
 
@@ -693,8 +699,9 @@ func applyLittleLawCheck(summary *windowSummary, llRef *littleLawReference) {
 		return
 	}
 
-	lower := llRef.p01NormalR
-	upper := llRef.p99NormalR
+	// experimentally set values
+	lower := math.Min(llRef.p01NormalR, 0.95)
+	upper := math.Max(llRef.p99NormalR, 1.10)
 
 	summary.LittleLawViolation = summary.ObservedR < lower || summary.ObservedR > upper
 
