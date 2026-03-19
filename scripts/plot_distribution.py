@@ -8,7 +8,7 @@ import numpy as np
 ROOT_DIR = "samples"
 
 csv_path_normal = "normal"
-csv_path_abnormal = "cpu_contention"
+csv_path_abnormal = "few_conns"
 
 window_results_csv_normal = os.path.join(ROOT_DIR, f"window_results_{csv_path_normal}.csv")
 window_results_csv_abnormal = os.path.join(ROOT_DIR, f"window_results_{csv_path_abnormal}.csv")
@@ -44,7 +44,7 @@ df_abnormal = pd.merge(
 # Pick a random normal window
 # -----------------------------
 normal_windows = list(
-    df_normal[["window_start", "window_end"]]
+    df_normal[df_normal["ll_violation"] == False][["window_start", "window_end"]]
     .drop_duplicates()
     .itertuples(index=False, name=None)
 )
