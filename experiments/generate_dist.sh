@@ -3,8 +3,8 @@ set -euo pipefail
 
 HOST=localhost
 PORT=8080
-REF_DIR=refs
-SAMPLES_DIR=samples
+REF_DIR=refs_new
+SAMPLES_DIR=samples_new
 DURATION=30s
 RPS=12000
 NUM_YES=100

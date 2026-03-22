@@ -35,37 +35,48 @@ type Attacker struct {
 	began      time.Time
 	chunked    bool
 
-	currentWorkers      int64
-	activeConns         int64
-	inFlight            int64
-	completions         int64
-	traceCh             chan *RequestRecord
+	currentWorkers int64
+	activeConns    int64
+	inFlight       int64
+	completions    int64
+	traceCh        chan *RequestRecord
 }
 
 // creating a struct to hold information related to each request
 type RequestRecord struct {
-	ID             uint64
-	TargetFireTime time.Time
-	WakeTime       time.Time
-	DispatchStart  time.Time
-	GotConnTime    time.Time
-	WroteReqTime   time.Time
-	FirstByteTime  time.Time
-	DoneTime       time.Time
-	DispatchDelay  time.Duration
-	DispatchDelayValid bool
-	ConnDelay      time.Duration
-	ConnDelayValid bool
-	WriteDelay     time.Duration
-	WriteDelayValid bool
-	FirstByteRTT   time.Duration
-	FirstByteRTTValid bool
-	FirstByteDelay time.Duration
+	ID                  uint64
+	TargetFireTime      time.Time
+	WakeTime            time.Time
+	DispatchStart       time.Time
+	GotConnTime         time.Time
+	WroteReqTime        time.Time
+	FirstByteTime       time.Time
+	DoneTime            time.Time
+	FireToDispatchDelay time.Duration
+	FireToDispatchValid bool
+	DispatchDelay       time.Duration
+	DispatchDelayValid  bool
+	ConnDelay           time.Duration
+	ConnDelayValid      bool
+	WriteDelay          time.Duration
+	WriteDelayValid     bool
+	FirstByteRTT        time.Duration
+	FirstByteRTTValid   bool
+	FirstByteDelay      time.Duration
 	FirstByteDelayValid bool
-	TotalLatency   time.Duration
-	TotalLatencyValid bool
-	SchedulerDelay time.Duration
+	ResponseTailTime    time.Duration
+	ResponseTailValid   bool
+	TotalLatency        time.Duration
+	TotalLatencyValid   bool
+	SchedulerDelay      time.Duration
 	SchedulerDelayValid bool
+
+	// connection related fields
+	ConnReused        bool
+	ConnWasIdle       bool
+	ConnIdleTime      time.Duration
+	ConnIdleTimeValid bool
+	GotConnValid      bool
 }
 
 const (
@@ -101,11 +112,11 @@ var (
 
 // RuntimeMetrics holds point-in-time attacker internals useful for time-series tracking.
 type RuntimeMetrics struct {
-	Timestamp      time.Time
-	Workers        uint64
-	Connections    uint64
-	InFlight       uint64
-	Completions    uint64
+	Timestamp   time.Time
+	Workers     uint64
+	Connections uint64
+	InFlight    uint64
+	Completions uint64
 }
 
 type FireEvent struct {
@@ -595,7 +606,7 @@ func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, tic
 		// create a new RequestRecord for this request
 		rec := &RequestRecord{}
 		rec.TargetFireTime = fire.TargetFireTime
-		rec.WakeTime = time.Now()	// record the time when the worker wakes up to process the request
+		rec.WakeTime = time.Now() // record the time when the worker wakes up to process the request
 
 		res := a.hit(tr, atk, rec)
 
@@ -631,11 +642,11 @@ func (a *Attacker) RuntimeMetrics() RuntimeMetrics {
 	}
 
 	return RuntimeMetrics{
-		Timestamp:      time.Now(),
-		Workers:        uint64(workers),
-		Connections:    uint64(connections),
-		InFlight:       uint64(inFlight),
-		Completions:    uint64(completions),
+		Timestamp:   time.Now(),
+		Workers:     uint64(workers),
+		Connections: uint64(connections),
+		InFlight:    uint64(inFlight),
+		Completions: uint64(completions),
 	}
 }
 
@@ -720,47 +731,86 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 
 		// update record
 		rec.DoneTime = tDone
+		if checkValidTime(rec.TargetFireTime, rec.DispatchStart) {
+			// fire-to-dispatch delay: the time between the scheduled fire time and actual request dispatch
+			rec.FireToDispatchDelay = rec.DispatchStart.Sub(rec.TargetFireTime)
+			rec.FireToDispatchValid = true
+		} else {
+			rec.FireToDispatchDelay = 0
+			rec.FireToDispatchValid = false
+		}
+
 		if checkValidTime(rec.WakeTime, rec.DispatchStart) {
 			// dispatch delay: the time between when the worker wakes up to process the request and when it actually makes the HTTP request (dispatch start)
 			rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
 			rec.DispatchDelayValid = true
-		} else {rec.DispatchDelay = 0; rec.DispatchDelayValid = false}
-		
+		} else {
+			rec.DispatchDelay = 0
+			rec.DispatchDelayValid = false
+		}
+
 		if checkValidTime(rec.DispatchStart, rec.GotConnTime) {
 			// connection delay: the time between when the HTTP request is dispatched and when a connection is obtained
 			rec.ConnDelay = rec.GotConnTime.Sub(rec.DispatchStart)
 			rec.ConnDelayValid = true
-		} else {rec.ConnDelay = 0; rec.ConnDelayValid = false}
-		
+		} else {
+			rec.ConnDelay = 0
+			rec.ConnDelayValid = false
+		}
+
 		if checkValidTime(rec.GotConnTime, rec.WroteReqTime) {
 			// write delay: how long it took for the client to write the request after obtaining a connection
 			rec.WriteDelay = rec.WroteReqTime.Sub(rec.GotConnTime)
 			rec.WriteDelayValid = true
-		} else {rec.WriteDelay = 0; rec.WriteDelayValid = false}
-		
+		} else {
+			rec.WriteDelay = 0
+			rec.WriteDelayValid = false
+		}
+
 		if checkValidTime(rec.WroteReqTime, rec.FirstByteTime) {
 			// first byte RTT: the time between when the request was written and when the first byte of the response was received
 			rec.FirstByteRTT = rec.FirstByteTime.Sub(rec.WroteReqTime)
 			rec.FirstByteRTTValid = true
-		} else {rec.FirstByteRTT = 0; rec.FirstByteRTTValid = false}
-		
+		} else {
+			rec.FirstByteRTT = 0
+			rec.FirstByteRTTValid = false
+		}
+
 		if checkValidTime(rec.DispatchStart, rec.FirstByteTime) {
-			// first byte delay: the time between when the request was dispatched (start of the request) and when the first byte of the response was received
+			// first byte delay: the time between when the request was dispatched and when the first response byte was received
 			rec.FirstByteDelay = rec.FirstByteTime.Sub(rec.DispatchStart)
 			rec.FirstByteDelayValid = true
-		} else {rec.FirstByteDelay = 0; rec.FirstByteDelayValid = false}
-		
+		} else {
+			rec.FirstByteDelay = 0
+			rec.FirstByteDelayValid = false
+		}
+
+		if checkValidTime(rec.FirstByteTime, rec.DoneTime) {
+			// response tail time: the time between the first response byte and request completion
+			rec.ResponseTailTime = rec.DoneTime.Sub(rec.FirstByteTime)
+			rec.ResponseTailValid = true
+		} else {
+			rec.ResponseTailTime = 0
+			rec.ResponseTailValid = false
+		}
+
 		if checkValidTime(rec.WakeTime, rec.DoneTime) {
 			// total latency: the time between when the worker wakes up to process the request and when the request is fully completed (response received)
 			rec.TotalLatency = rec.DoneTime.Sub(rec.WakeTime)
 			rec.TotalLatencyValid = true
-		} else {rec.TotalLatency = 0; rec.TotalLatencyValid = false}
-		
+		} else {
+			rec.TotalLatency = 0
+			rec.TotalLatencyValid = false
+		}
+
 		if checkValidTime(rec.TargetFireTime, rec.WakeTime) {
 			// scheduler delay: the time between when the request was scheduled to be fired and when the worker actually woke up to process it
 			rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
 			rec.SchedulerDelayValid = true
-		} else {rec.SchedulerDelay = 0; rec.SchedulerDelayValid = false}
+		} else {
+			rec.SchedulerDelay = 0
+			rec.SchedulerDelayValid = false
+		}
 
 		res.Latency = time.Since(res.Timestamp)
 		if err != nil {
@@ -792,10 +842,20 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 	}
 
 	trace := &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			traceMu.Lock()
 			tGotConn = time.Now()
 			rec.GotConnTime = tGotConn
+			rec.GotConnValid = true
+			rec.ConnReused = info.Reused
+			rec.ConnWasIdle = info.WasIdle
+			if info.WasIdle {
+				rec.ConnIdleTime = info.IdleTime
+				rec.ConnIdleTimeValid = true
+			} else {
+				rec.ConnIdleTime = 0
+				rec.ConnIdleTimeValid = false
+			}
 			traceMu.Unlock()
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {

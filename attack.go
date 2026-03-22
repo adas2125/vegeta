@@ -138,53 +138,88 @@ type WindowStats struct {
 
 	// valid counts for each metric
 	SchedulerDelayValidCount int
+	FireToDispatchValidCount int
 	DispatchDelayValidCount  int
 	ConnDelayValidCount      int
 	WriteDelayValidCount     int
 	FirstByteRTTValidCount   int
 	FirstByteDelayValidCount int
+	ResponseTailValidCount   int
 	TotalLatencyValidCount   int
 
 	SumSchedulerDelay  time.Duration
+	SumFireToDispatch  time.Duration
 	SumDispatchDelay   time.Duration
 	SumConnDelay       time.Duration
 	SumWriteDelay      time.Duration
 	SumFirstByteRTT    time.Duration
 	SumFirstByteDelay  time.Duration
+	SumResponseTail    time.Duration
 	SumTotalLatency    time.Duration
 	SumInFlightSamples float64
 	NumInFlightSamples int64
 
 	// to plot distributions
 	SchedulerDelaySamples []float64
+	FireToDispatchSamples []float64
 	DispatchDelaySamples  []float64
 	ConnDelaySamples      []float64
 	WriteDelaySamples     []float64
 	FirstByteRTTSamples   []float64
 	FirstByteDelaySamples []float64
+	ResponseTailSamples   []float64
 	TotalLatencySamples   []float64
+
+	// connection-state counts
+	GotConnCount           int
+	ReusedConnCount        int
+	FreshConnCount         int
+	ReusedIdleConnCount    int
+	ConnIdleTimeValidCount int
+	SumConnIdleTime        time.Duration
+	ConnIdleTimeSamples    []float64
 }
 
 type windowSummary struct {
+	// diagnostic counts for each metric
 	SchedulerDelayCount int
+	FireToDispatchCount int
 	DispatchDelayCount  int
 	ConnDelayCount      int
 	WriteDelayCount     int
 	FirstByteRTTCount   int
 	FirstByteDelayCount int
+	ResponseTailCount   int
 	TotalLatencyCount   int
-	Duration            time.Duration
-	AchievedRate        float64
-	AvgSchedulerDelay   time.Duration
-	AvgDispatchDelay    time.Duration
-	AvgConnDelay        time.Duration
-	AvgWriteDelay       time.Duration
-	AvgFirstByteRTT     time.Duration
-	AvgFirstByteDelay   time.Duration
-	AvgTotalLatency     time.Duration
-	AvgInFlight         float64
-	ObservedR           float64
-	LittleLawViolation  bool
+
+	// connection-state counts
+	GotConnCount        int
+	ReusedConnCount     int
+	FreshConnCount      int
+	ReusedIdleConnCount int
+	ConnIdleTimeCount   int
+	AvgConnIdleTime     time.Duration
+	ReuseFrac           float64
+	FreshConnFrac       float64
+	WasIdleGivenReused  float64
+
+	// averages
+	Duration          time.Duration
+	AchievedRate      float64
+	AvgSchedulerDelay time.Duration
+	AvgFireToDispatch time.Duration
+	AvgDispatchDelay  time.Duration
+	AvgConnDelay      time.Duration
+	AvgWriteDelay     time.Duration
+	AvgFirstByteRTT   time.Duration
+	AvgFirstByteDelay time.Duration
+	AvgResponseTail   time.Duration
+	AvgTotalLatency   time.Duration
+	AvgInFlight       float64
+
+	// for violations
+	ObservedR          float64
+	LittleLawViolation bool
 }
 
 type windowSamplesCSVWriter struct {
@@ -379,6 +414,18 @@ func attack(opts *attackOpts) (err error) {
 	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, traces)
 }
 
+func hasAnyValidSamples(window *WindowStats) bool {
+	return window.TotalLatencyValidCount > 0 ||
+		window.SchedulerDelayValidCount > 0 ||
+		window.FireToDispatchValidCount > 0 ||
+		window.DispatchDelayValidCount > 0 ||
+		window.ConnDelayValidCount > 0 ||
+		window.WriteDelayValidCount > 0 ||
+		window.FirstByteRTTValidCount > 0 ||
+		window.FirstByteDelayValidCount > 0 ||
+		window.ResponseTailValidCount > 0
+}
+
 func processAttack(
 	atk *vegeta.Attacker,
 	res <-chan *vegeta.Result,
@@ -435,14 +482,7 @@ func processAttack(
 					applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last ticker tick
 					applyLittleLawCheck(&summary, llRef)
 
-					hasAnySamples := window.TotalLatencyValidCount > 0 ||
-						window.SchedulerDelayValidCount > 0 ||
-						window.DispatchDelayValidCount > 0 ||
-						window.ConnDelayValidCount > 0 ||
-						window.WriteDelayValidCount > 0 ||
-						window.FirstByteRTTValidCount > 0 ||
-						window.FirstByteDelayValidCount > 0
-
+					hasAnySamples := hasAnyValidSamples(window)
 					if !hasAnySamples {
 						return nil
 					}
@@ -484,14 +524,7 @@ func processAttack(
 					applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last ticker tick
 					applyLittleLawCheck(&summary, llRef)
 
-					hasAnySamples := window.TotalLatencyValidCount > 0 ||
-						window.SchedulerDelayValidCount > 0 ||
-						window.DispatchDelayValidCount > 0 ||
-						window.ConnDelayValidCount > 0 ||
-						window.WriteDelayValidCount > 0 ||
-						window.FirstByteRTTValidCount > 0 ||
-						window.FirstByteDelayValidCount > 0
-
+					hasAnySamples := hasAnyValidSamples(window)
 					if !hasAnySamples {
 						return nil
 					}
@@ -520,6 +553,11 @@ func processAttack(
 				window.SumSchedulerDelay += rec.SchedulerDelay
 				window.SchedulerDelaySamples = append(window.SchedulerDelaySamples, float64(rec.SchedulerDelay)/float64(time.Millisecond))
 			}
+			if rec.FireToDispatchValid {
+				window.FireToDispatchValidCount++
+				window.SumFireToDispatch += rec.FireToDispatchDelay
+				window.FireToDispatchSamples = append(window.FireToDispatchSamples, float64(rec.FireToDispatchDelay)/float64(time.Millisecond))
+			}
 			if rec.DispatchDelayValid {
 				window.DispatchDelayValidCount++
 				window.SumDispatchDelay += rec.DispatchDelay
@@ -545,10 +583,39 @@ func processAttack(
 				window.SumFirstByteDelay += rec.FirstByteDelay
 				window.FirstByteDelaySamples = append(window.FirstByteDelaySamples, float64(rec.FirstByteDelay)/float64(time.Millisecond))
 			}
+			if rec.ResponseTailValid {
+				window.ResponseTailValidCount++
+				window.SumResponseTail += rec.ResponseTailTime
+				window.ResponseTailSamples = append(window.ResponseTailSamples, float64(rec.ResponseTailTime)/float64(time.Millisecond))
+			}
 			if rec.TotalLatencyValid {
 				window.TotalLatencyValidCount++
 				window.SumTotalLatency += rec.TotalLatency
 				window.TotalLatencySamples = append(window.TotalLatencySamples, float64(rec.TotalLatency)/float64(time.Millisecond))
+			}
+
+			// updating connection-state counts
+			if rec.GotConnValid {
+				window.GotConnCount++
+
+				if rec.ConnReused {
+					window.ReusedConnCount++
+				} else {
+					window.FreshConnCount++
+				}
+
+				if rec.ConnReused && rec.ConnWasIdle {
+					window.ReusedIdleConnCount++
+				}
+
+				if rec.ConnIdleTimeValid {
+					window.ConnIdleTimeValidCount++
+					window.SumConnIdleTime += rec.ConnIdleTime
+					window.ConnIdleTimeSamples = append(
+						window.ConnIdleTimeSamples,
+						float64(rec.ConnIdleTime)/float64(time.Millisecond),
+					)
+				}
 			}
 
 		case <-sampleTicker.C:
@@ -578,14 +645,7 @@ func processAttack(
 			applyObservedR(&summary, llRef) // update observed R as in-flight samples may have changed since the last sample ticker tick
 			applyLittleLawCheck(&summary, llRef)
 
-			hasAnySamples := window.TotalLatencyValidCount > 0 ||
-				window.SchedulerDelayValidCount > 0 ||
-				window.DispatchDelayValidCount > 0 ||
-				window.ConnDelayValidCount > 0 ||
-				window.WriteDelayValidCount > 0 ||
-				window.FirstByteRTTValidCount > 0 ||
-				window.FirstByteDelayValidCount > 0
-
+			hasAnySamples := hasAnyValidSamples(window)
 			if !hasAnySamples {
 				// reset the window stats for the next interval
 				window = &WindowStats{Start: time.Now()}
@@ -607,11 +667,13 @@ func processAttack(
 					dm.ObserveWindow(
 						summary.AchievedRate,
 						msFloat(summary.AvgSchedulerDelay),
+						msFloat(summary.AvgFireToDispatch),
 						msFloat(summary.AvgDispatchDelay),
 						msFloat(summary.AvgConnDelay),
 						msFloat(summary.AvgWriteDelay),
 						msFloat(summary.AvgFirstByteRTT),
 						msFloat(summary.AvgFirstByteDelay),
+						msFloat(summary.AvgResponseTail),
 						msFloat(summary.AvgTotalLatency),
 						summary.AvgInFlight,
 						summary.ObservedR,
@@ -630,13 +692,22 @@ func processAttack(
 func (w *WindowStats) Summary() windowSummary {
 	summary := windowSummary{
 		SchedulerDelayCount: w.SchedulerDelayValidCount,
+		FireToDispatchCount: w.FireToDispatchValidCount,
 		DispatchDelayCount:  w.DispatchDelayValidCount,
 		ConnDelayCount:      w.ConnDelayValidCount,
 		WriteDelayCount:     w.WriteDelayValidCount,
 		FirstByteRTTCount:   w.FirstByteRTTValidCount,
 		FirstByteDelayCount: w.FirstByteDelayValidCount,
+		ResponseTailCount:   w.ResponseTailValidCount,
 		TotalLatencyCount:   w.TotalLatencyValidCount,
-		Duration:            w.End.Sub(w.Start),
+
+		GotConnCount:        w.GotConnCount,
+		ReusedConnCount:     w.ReusedConnCount,
+		FreshConnCount:      w.FreshConnCount,
+		ReusedIdleConnCount: w.ReusedIdleConnCount,
+		ConnIdleTimeCount:   w.ConnIdleTimeValidCount,
+
+		Duration: w.End.Sub(w.Start),
 	}
 
 	// compute valid achieved rate for the window
@@ -647,6 +718,9 @@ func (w *WindowStats) Summary() windowSummary {
 	// compute average metrics for the window
 	if w.SchedulerDelayValidCount > 0 {
 		summary.AvgSchedulerDelay = w.SumSchedulerDelay / time.Duration(w.SchedulerDelayValidCount)
+	}
+	if w.FireToDispatchValidCount > 0 {
+		summary.AvgFireToDispatch = w.SumFireToDispatch / time.Duration(w.FireToDispatchValidCount)
 	}
 	if w.DispatchDelayValidCount > 0 {
 		summary.AvgDispatchDelay = w.SumDispatchDelay / time.Duration(w.DispatchDelayValidCount)
@@ -663,8 +737,23 @@ func (w *WindowStats) Summary() windowSummary {
 	if w.FirstByteDelayValidCount > 0 {
 		summary.AvgFirstByteDelay = w.SumFirstByteDelay / time.Duration(w.FirstByteDelayValidCount)
 	}
+	if w.ResponseTailValidCount > 0 {
+		summary.AvgResponseTail = w.SumResponseTail / time.Duration(w.ResponseTailValidCount)
+	}
 	if w.TotalLatencyValidCount > 0 {
 		summary.AvgTotalLatency = w.SumTotalLatency / time.Duration(w.TotalLatencyValidCount)
+	}
+	if w.ConnIdleTimeValidCount > 0 {
+		summary.AvgConnIdleTime = w.SumConnIdleTime / time.Duration(w.ConnIdleTimeValidCount)
+	}
+
+	if w.GotConnCount > 0 {
+		summary.ReuseFrac = float64(w.ReusedConnCount) / float64(w.GotConnCount)
+		summary.FreshConnFrac = float64(w.FreshConnCount) / float64(w.GotConnCount)
+	}
+
+	if w.ReusedConnCount > 0 {
+		summary.WasIdleGivenReused = float64(w.ReusedIdleConnCount) / float64(w.ReusedConnCount)
 	}
 
 	if w.NumInFlightSamples > 0 {
@@ -971,11 +1060,22 @@ func newWindowCSVWriter(path string) (*windowCSVWriter, error) {
 		"total_latency_count",
 		"valid_achieved_rate",
 		"avg_scheduler_delay_ms",
+		"avg_fire_to_dispatch_delay_ms",
 		"avg_dispatch_delay_ms",
 		"avg_conn_delay_ms",
+		"got_conn_count",
+		"reused_conn_count",
+		"fresh_conn_count",
+		"reused_idle_conn_count",
+		"conn_idle_time_count",
+		"reuse_frac",
+		"fresh_conn_frac",
+		"was_idle_given_reused",
+		"avg_conn_idle_time_ms",
 		"avg_write_delay_ms",
 		"avg_first_byte_rtt_ms",
 		"avg_first_byte_delay_ms",
+		"avg_response_tail_time_ms",
 		"avg_total_latency_ms",
 		"avg_in_flight",
 		"observed_R",
@@ -1030,11 +1130,22 @@ func (w *windowCSVWriter) Write(window *WindowStats, summary windowSummary) erro
 		strconv.Itoa(summary.TotalLatencyCount),
 		strconv.FormatFloat(summary.AchievedRate, 'f', 6, 64),
 		strconv.FormatFloat(float64(summary.AvgSchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(summary.AvgFireToDispatch)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgDispatchDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgConnDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.Itoa(summary.GotConnCount),
+		strconv.Itoa(summary.ReusedConnCount),
+		strconv.Itoa(summary.FreshConnCount),
+		strconv.Itoa(summary.ReusedIdleConnCount),
+		strconv.Itoa(summary.ConnIdleTimeCount),
+		strconv.FormatFloat(summary.ReuseFrac, 'f', 6, 64),
+		strconv.FormatFloat(summary.FreshConnFrac, 'f', 6, 64),
+		strconv.FormatFloat(summary.WasIdleGivenReused, 'f', 6, 64),
+		strconv.FormatFloat(float64(summary.AvgConnIdleTime)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgWriteDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgFirstByteRTT)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgFirstByteDelay)/float64(time.Millisecond), 'f', 3, 64),
+		strconv.FormatFloat(float64(summary.AvgResponseTail)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgTotalLatency)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(summary.AvgInFlight, 'f', 6, 64),
 		strconv.FormatFloat(summary.ObservedR, 'f', 6, 64),
@@ -1107,6 +1218,9 @@ func (w *windowSamplesCSVWriter) WriteWindowSamples(window *WindowStats) error {
 	if err := writeMetric("scheduler_delay", window.SchedulerDelaySamples); err != nil {
 		return err
 	}
+	if err := writeMetric("fire_to_dispatch_delay", window.FireToDispatchSamples); err != nil {
+		return err
+	}
 	if err := writeMetric("dispatch_delay", window.DispatchDelaySamples); err != nil {
 		return err
 	}
@@ -1122,7 +1236,13 @@ func (w *windowSamplesCSVWriter) WriteWindowSamples(window *WindowStats) error {
 	if err := writeMetric("first_byte_delay", window.FirstByteDelaySamples); err != nil {
 		return err
 	}
+	if err := writeMetric("response_tail_time", window.ResponseTailSamples); err != nil {
+		return err
+	}
 	if err := writeMetric("total_latency", window.TotalLatencySamples); err != nil {
+		return err
+	}
+	if err := writeMetric("conn_idle_time", window.ConnIdleTimeSamples); err != nil {
 		return err
 	}
 
