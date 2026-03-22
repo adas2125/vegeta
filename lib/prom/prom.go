@@ -91,17 +91,19 @@ type DiagnosticMetrics struct {
 	Completions prometheus.Gauge // monotonically increasing within a run; exposed as Gauge so Set() works
 
 	// per-window aggregates — updated at every window flush
-	AchievedRate     prometheus.Gauge
-	SchedulerDelayMs prometheus.Gauge
-	DispatchDelayMs  prometheus.Gauge
-	ConnDelayMs      prometheus.Gauge
-	WriteDelayMs     prometheus.Gauge
-	FirstByteRTTMs   prometheus.Gauge
-	FirstByteDelayMs prometheus.Gauge
-	TotalLatencyMs   prometheus.Gauge
-	AvgInFlight      prometheus.Gauge
-	ObservedR        prometheus.Gauge
-	LLViolation      prometheus.Gauge
+	AchievedRate          prometheus.Gauge
+	SchedulerDelayMs      prometheus.Gauge
+	FireToDispatchDelayMs prometheus.Gauge
+	DispatchDelayMs       prometheus.Gauge
+	ConnDelayMs           prometheus.Gauge
+	WriteDelayMs          prometheus.Gauge
+	FirstByteRTTMs        prometheus.Gauge
+	FirstByteDelayMs      prometheus.Gauge
+	ResponseTailTimeMs    prometheus.Gauge
+	TotalLatencyMs        prometheus.Gauge
+	AvgInFlight           prometheus.Gauge
+	ObservedR             prometheus.Gauge
+	LLViolation           prometheus.Gauge
 }
 
 // NewDiagnosticMetrics creates a DiagnosticMetrics instance. Call Register to
@@ -132,6 +134,10 @@ func NewDiagnosticMetrics() *DiagnosticMetrics {
 			Name: "vegeta_window_scheduler_delay_ms",
 			Help: "Average scheduler delay in the current window (ms) — time between scheduled fire and worker wake-up; indicates client CPU/OS jitter",
 		}),
+		FireToDispatchDelayMs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "vegeta_window_fire_to_dispatch_delay_ms",
+			Help: "Average delay from scheduled fire time to HTTP request dispatch in the current window (ms)",
+		}),
 		DispatchDelayMs: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "vegeta_window_dispatch_delay_ms",
 			Help: "Average dispatch delay in the current window (ms) — time between worker wake-up and HTTP request dispatch",
@@ -151,6 +157,10 @@ func NewDiagnosticMetrics() *DiagnosticMetrics {
 		FirstByteDelayMs: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "vegeta_window_first_byte_delay_ms",
 			Help: "Average time from request dispatch to first response byte in the current window (ms)",
+		}),
+		ResponseTailTimeMs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "vegeta_window_response_tail_time_ms",
+			Help: "Average time from first response byte to request completion in the current window (ms)",
 		}),
 		TotalLatencyMs: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "vegeta_window_total_latency_ms",
@@ -177,11 +187,13 @@ func (dm *DiagnosticMetrics) Register(r prometheus.Registerer) error {
 		dm.Workers, dm.Connections, dm.InFlight, dm.Completions,
 		dm.AchievedRate,
 		dm.SchedulerDelayMs,
+		dm.FireToDispatchDelayMs,
 		dm.DispatchDelayMs,
 		dm.ConnDelayMs,
 		dm.WriteDelayMs,
 		dm.FirstByteRTTMs,
 		dm.FirstByteDelayMs,
+		dm.ResponseTailTimeMs,
 		dm.TotalLatencyMs,
 		dm.AvgInFlight,
 		dm.ObservedR,
@@ -208,18 +220,20 @@ func (dm *DiagnosticMetrics) ObserveRuntime(workers, connections, inFlight, comp
 // gauge will be set to -1 in that case to distinguish from a true zero.
 func (dm *DiagnosticMetrics) ObserveWindow(
 	achievedRate float64,
-	schedulerMs, dispatchMs, connMs, writeMs float64,
-	fbRTTMs, fbDelayMs, totalLatMs float64,
+	schedulerMs, fireToDispatchMs, dispatchMs, connMs, writeMs float64,
+	fbRTTMs, fbDelayMs, responseTailMs, totalLatMs float64,
 	avgInFlight, observedR float64,
 	llViolation bool,
 ) {
 	dm.AchievedRate.Set(achievedRate)
 	dm.SchedulerDelayMs.Set(schedulerMs)
+	dm.FireToDispatchDelayMs.Set(fireToDispatchMs)
 	dm.DispatchDelayMs.Set(dispatchMs)
 	dm.ConnDelayMs.Set(connMs)
 	dm.WriteDelayMs.Set(writeMs)
 	dm.FirstByteRTTMs.Set(fbRTTMs)
 	dm.FirstByteDelayMs.Set(fbDelayMs)
+	dm.ResponseTailTimeMs.Set(responseTailMs)
 	dm.TotalLatencyMs.Set(totalLatMs)
 	dm.AvgInFlight.Set(avgInFlight)
 
