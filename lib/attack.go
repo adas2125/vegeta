@@ -45,7 +45,9 @@ type Attacker struct {
 // creating a struct to hold information related to each request
 type RequestRecord struct {
 	ID                  uint64
-	TargetFireTime      time.Time
+	FireTime            time.Time
+	PacerWait           time.Duration
+	PacerWaitValid      bool
 	WakeTime            time.Time
 	DispatchStart       time.Time
 	GotConnTime         time.Time
@@ -120,7 +122,8 @@ type RuntimeMetrics struct {
 }
 
 type FireEvent struct {
-	TargetFireTime time.Time
+	FireTime  time.Time
+	PacerWait time.Duration
 }
 
 func (a *Attacker) TraceRecords() <-chan *RequestRecord {
@@ -549,14 +552,15 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 			}
 
 			// target: the time at which the request should be fired
-			beforeSleep := time.Now()
-			target := beforeSleep.Add(wait)
+			// beforeSleep := time.Now()
+			// target := beforeSleep.Add(wait)
 			time.Sleep(wait)
+			fire_time := time.Now()
 
 			if workers < a.maxWorkers {
 				select {
 				// send the firetick struct to the ticks channel to signal a worker to fire a request
-				case ticks <- &FireEvent{TargetFireTime: target}:
+				case ticks <- &FireEvent{FireTime: fire_time, PacerWait: wait}:
 					count++
 					continue
 				case <-a.stopch:
@@ -570,7 +574,7 @@ func (a *Attacker) Attack(tr Targeter, p Pacer, du time.Duration, name string) <
 			}
 
 			select {
-			case ticks <- &FireEvent{TargetFireTime: target}:
+			case ticks <- &FireEvent{FireTime: fire_time, PacerWait: wait}:
 				count++
 			case <-a.stopch:
 				return
@@ -605,7 +609,9 @@ func (a *Attacker) attack(tr Targeter, atk *attack, workers *sync.WaitGroup, tic
 
 		// create a new RequestRecord for this request
 		rec := &RequestRecord{}
-		rec.TargetFireTime = fire.TargetFireTime
+		rec.FireTime = fire.FireTime
+		rec.PacerWait = fire.PacerWait
+		rec.PacerWaitValid = true
 		rec.WakeTime = time.Now() // record the time when the worker wakes up to process the request
 
 		res := a.hit(tr, atk, rec)
@@ -731,9 +737,9 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 
 		// update record
 		rec.DoneTime = tDone
-		if checkValidTime(rec.TargetFireTime, rec.DispatchStart) {
-			// fire-to-dispatch delay: the time between the scheduled fire time and actual request dispatch
-			rec.FireToDispatchDelay = rec.DispatchStart.Sub(rec.TargetFireTime)
+		if checkValidTime(rec.FireTime, rec.DispatchStart) {
+			// fire-to-dispatch delay: the time between the fire time and actual request dispatch
+			rec.FireToDispatchDelay = rec.DispatchStart.Sub(rec.FireTime)
 			rec.FireToDispatchValid = true
 		} else {
 			rec.FireToDispatchDelay = 0
@@ -803,9 +809,9 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 			rec.TotalLatencyValid = false
 		}
 
-		if checkValidTime(rec.TargetFireTime, rec.WakeTime) {
-			// scheduler delay: the time between when the request was scheduled to be fired and when the worker actually woke up to process it
-			rec.SchedulerDelay = rec.WakeTime.Sub(rec.TargetFireTime)
+		if checkValidTime(rec.FireTime, rec.WakeTime) {
+			// scheduler delay: the time between when the request was fired and when the worker woke up to process it
+			rec.SchedulerDelay = rec.WakeTime.Sub(rec.FireTime)
 			rec.SchedulerDelayValid = true
 		} else {
 			rec.SchedulerDelay = 0

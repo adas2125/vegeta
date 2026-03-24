@@ -137,6 +137,7 @@ type WindowStats struct {
 	End   time.Time
 
 	// valid counts for each metric
+	PacerWaitValidCount      int
 	SchedulerDelayValidCount int
 	FireToDispatchValidCount int
 	DispatchDelayValidCount  int
@@ -147,6 +148,7 @@ type WindowStats struct {
 	ResponseTailValidCount   int
 	TotalLatencyValidCount   int
 
+	SumPacerWait       time.Duration
 	SumSchedulerDelay  time.Duration
 	SumFireToDispatch  time.Duration
 	SumDispatchDelay   time.Duration
@@ -160,6 +162,7 @@ type WindowStats struct {
 	NumInFlightSamples int64
 
 	// to plot distributions
+	PacerWaitSamples      []float64
 	SchedulerDelaySamples []float64
 	FireToDispatchSamples []float64
 	DispatchDelaySamples  []float64
@@ -182,6 +185,7 @@ type WindowStats struct {
 
 type windowSummary struct {
 	// diagnostic counts for each metric
+	PacerWaitCount      int
 	SchedulerDelayCount int
 	FireToDispatchCount int
 	DispatchDelayCount  int
@@ -206,6 +210,7 @@ type windowSummary struct {
 	// averages
 	Duration          time.Duration
 	AchievedRate      float64
+	AvgPacerWait      time.Duration
 	AvgSchedulerDelay time.Duration
 	AvgFireToDispatch time.Duration
 	AvgDispatchDelay  time.Duration
@@ -548,6 +553,11 @@ func processAttack(
 
 			// update the window stats on receipt of a valid record
 
+			if rec.PacerWaitValid {
+				window.PacerWaitValidCount++
+				window.SumPacerWait += rec.PacerWait
+				window.PacerWaitSamples = append(window.PacerWaitSamples, float64(rec.PacerWait)/float64(time.Millisecond))
+			}
 			if rec.SchedulerDelayValid {
 				window.SchedulerDelayValidCount++
 				window.SumSchedulerDelay += rec.SchedulerDelay
@@ -691,6 +701,7 @@ func processAttack(
 
 func (w *WindowStats) Summary() windowSummary {
 	summary := windowSummary{
+		PacerWaitCount:      w.PacerWaitValidCount,
 		SchedulerDelayCount: w.SchedulerDelayValidCount,
 		FireToDispatchCount: w.FireToDispatchValidCount,
 		DispatchDelayCount:  w.DispatchDelayValidCount,
@@ -716,6 +727,9 @@ func (w *WindowStats) Summary() windowSummary {
 	}
 
 	// compute average metrics for the window
+	if w.PacerWaitValidCount > 0 {
+		summary.AvgPacerWait = w.SumPacerWait / time.Duration(w.PacerWaitValidCount)
+	}
 	if w.SchedulerDelayValidCount > 0 {
 		summary.AvgSchedulerDelay = w.SumSchedulerDelay / time.Duration(w.SchedulerDelayValidCount)
 	}
@@ -1059,6 +1073,7 @@ func newWindowCSVWriter(path string) (*windowCSVWriter, error) {
 		"window_duration_ms",
 		"total_latency_count",
 		"valid_achieved_rate",
+		"avg_pacer_wait_ms",
 		"avg_scheduler_delay_ms",
 		"avg_fire_to_dispatch_delay_ms",
 		"avg_dispatch_delay_ms",
@@ -1129,6 +1144,7 @@ func (w *windowCSVWriter) Write(window *WindowStats, summary windowSummary) erro
 		strconv.FormatFloat(float64(summary.Duration)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.Itoa(summary.TotalLatencyCount),
 		strconv.FormatFloat(summary.AchievedRate, 'f', 6, 64),
+		strconv.FormatFloat(float64(summary.AvgPacerWait)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgSchedulerDelay)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgFireToDispatch)/float64(time.Millisecond), 'f', 3, 64),
 		strconv.FormatFloat(float64(summary.AvgDispatchDelay)/float64(time.Millisecond), 'f', 3, 64),
@@ -1215,6 +1231,9 @@ func (w *windowSamplesCSVWriter) WriteWindowSamples(window *WindowStats) error {
 		return nil
 	}
 
+	if err := writeMetric("pacer_wait", window.PacerWaitSamples); err != nil {
+		return err
+	}
 	if err := writeMetric("scheduler_delay", window.SchedulerDelaySamples); err != nil {
 		return err
 	}
