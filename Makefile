@@ -16,4 +16,4 @@ generate:
 	PATH="$(GOTOOLBIN):$$PATH" go generate ./...
 
 clean:
-	rm -f results.csv window_results.csv
+	rm -f results.csv window_results.csv window_samples.csv
