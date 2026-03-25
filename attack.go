@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -76,6 +77,7 @@ func attackCmd() command {
 	fs.StringVar(&opts.referenceCSVPath, "reference-csv-path", "", "CSV file path for computed baseline latency for R metric computation")
 	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
 	fs.DurationVar(&opts.sampleInterval, "sample-interval", 10*time.Millisecond, "Sampling interval for windowed trace metrics (in-flight), must be less than or equal to metrics-interval")
+	fs.Float64Var(&opts.windowSampleRetention, "window-sample-retention", 1.0, "Fraction of request trace samples to retain for per-window distribution outputs [0.0-1.0]")
 	systemSpecificFlags(fs, opts)
 
 	return command{fs, func(args []string) error {
@@ -91,45 +93,46 @@ var (
 
 // attackOpts aggregates the attack function command options
 type attackOpts struct {
-	name                 string
-	targetsf             string
-	format               string
-	outputf              string
-	bodyf                string
-	certf                string
-	keyf                 string
-	rootCerts            csl
-	http2                bool
-	h2c                  bool
-	insecure             bool
-	lazy                 bool
-	chunked              bool
-	duration             time.Duration
-	timeout              time.Duration
-	rate                 vegeta.Rate
-	workers              uint64
-	maxWorkers           uint64
-	connections          int
-	maxConnections       int
-	redirects            int
-	maxBody              int64
-	headers              headers
-	proxyHeaders         headers
-	laddr                localAddr
-	keepalive            bool
-	resolvers            csl
-	unixSocket           string
-	promAddr             string
-	metricsCSV           string
-	windowCSV            string
-	windowSamplesCSV     string
-	baselineReferenceCSV string
-	metricsInterval      time.Duration
-	sampleInterval       time.Duration
-	referenceCSVPath     string
-	dnsTTL               time.Duration
-	sessionTickets       bool
-	connectTo            map[string][]string
+	name                  string
+	targetsf              string
+	format                string
+	outputf               string
+	bodyf                 string
+	certf                 string
+	keyf                  string
+	rootCerts             csl
+	http2                 bool
+	h2c                   bool
+	insecure              bool
+	lazy                  bool
+	chunked               bool
+	duration              time.Duration
+	timeout               time.Duration
+	rate                  vegeta.Rate
+	workers               uint64
+	maxWorkers            uint64
+	connections           int
+	maxConnections        int
+	redirects             int
+	maxBody               int64
+	headers               headers
+	proxyHeaders          headers
+	laddr                 localAddr
+	keepalive             bool
+	resolvers             csl
+	unixSocket            string
+	promAddr              string
+	metricsCSV            string
+	windowCSV             string
+	windowSamplesCSV      string
+	baselineReferenceCSV  string
+	metricsInterval       time.Duration
+	sampleInterval        time.Duration
+	windowSampleRetention float64
+	referenceCSVPath      string
+	dnsTTL                time.Duration
+	sessionTickets        bool
+	connectTo             map[string][]string
 }
 
 type WindowStats struct {
@@ -240,6 +243,9 @@ type littleLawReference struct {
 func attack(opts *attackOpts) (err error) {
 	if opts.maxWorkers == vegeta.DefaultMaxWorkers && opts.rate.Freq == 0 {
 		return fmt.Errorf("-rate=0 requires setting -max-workers")
+	}
+	if opts.windowSampleRetention < 0 || opts.windowSampleRetention > 1 {
+		return fmt.Errorf("-window-sample-retention must be between 0.0 and 1.0")
 	}
 
 	if len(opts.resolvers) > 0 {
@@ -411,7 +417,7 @@ func attack(opts *attackOpts) (err error) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, traces)
+	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, opts.windowSampleRetention, traces)
 }
 
 func hasAnyValidSamples(window *WindowStats) bool {
@@ -438,6 +444,7 @@ func processAttack(
 	llRef *littleLawReference,
 	metricsInterval time.Duration,
 	sampleInterval time.Duration,
+	windowSampleRetention float64,
 	traces <-chan *vegeta.RequestRecord,
 ) error {
 
@@ -456,6 +463,7 @@ func processAttack(
 
 	// initializing the window stats for the first interval
 	window := &WindowStats{Start: time.Now()}
+	sampleRNG := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for {
 		select {
@@ -546,51 +554,70 @@ func processAttack(
 			}
 
 			// update the window stats on receipt of a valid record
+			retainSamples := sampleRNG.Float64() < windowSampleRetention
 
 			if rec.PacerWaitValid {
 				window.PacerWaitValidCount++
 				window.SumPacerWait += rec.PacerWait
-				window.PacerWaitSamples = append(window.PacerWaitSamples, float64(rec.PacerWait)/float64(time.Millisecond))
+				if retainSamples {
+					window.PacerWaitSamples = append(window.PacerWaitSamples, float64(rec.PacerWait)/float64(time.Millisecond))
+				}
 			}
 			if rec.SchedulerDelayValid {
 				window.SchedulerDelayValidCount++
 				window.SumSchedulerDelay += rec.SchedulerDelay
-				window.SchedulerDelaySamples = append(window.SchedulerDelaySamples, float64(rec.SchedulerDelay)/float64(time.Millisecond))
+				if retainSamples {
+					window.SchedulerDelaySamples = append(window.SchedulerDelaySamples, float64(rec.SchedulerDelay)/float64(time.Millisecond))
+				}
 			}
 			if rec.DispatchDelayValid {
 				window.DispatchDelayValidCount++
 				window.SumDispatchDelay += rec.DispatchDelay
-				window.DispatchDelaySamples = append(window.DispatchDelaySamples, float64(rec.DispatchDelay)/float64(time.Millisecond))
+				if retainSamples {
+					window.DispatchDelaySamples = append(window.DispatchDelaySamples, float64(rec.DispatchDelay)/float64(time.Millisecond))
+				}
 			}
 			if rec.ConnDelayValid {
 				window.ConnDelayValidCount++
 				window.SumConnDelay += rec.ConnDelay
-				window.ConnDelaySamples = append(window.ConnDelaySamples, float64(rec.ConnDelay)/float64(time.Millisecond))
+				if retainSamples {
+					window.ConnDelaySamples = append(window.ConnDelaySamples, float64(rec.ConnDelay)/float64(time.Millisecond))
+				}
 			}
 			if rec.WriteDelayValid {
 				window.WriteDelayValidCount++
 				window.SumWriteDelay += rec.WriteDelay
-				window.WriteDelaySamples = append(window.WriteDelaySamples, float64(rec.WriteDelay)/float64(time.Millisecond))
+				if retainSamples {
+					window.WriteDelaySamples = append(window.WriteDelaySamples, float64(rec.WriteDelay)/float64(time.Millisecond))
+				}
 			}
 			if rec.FirstByteRTTValid {
 				window.FirstByteRTTValidCount++
 				window.SumFirstByteRTT += rec.FirstByteRTT
-				window.FirstByteRTTSamples = append(window.FirstByteRTTSamples, float64(rec.FirstByteRTT)/float64(time.Millisecond))
+				if retainSamples {
+					window.FirstByteRTTSamples = append(window.FirstByteRTTSamples, float64(rec.FirstByteRTT)/float64(time.Millisecond))
+				}
 			}
 			if rec.FirstByteDelayValid {
 				window.FirstByteDelayValidCount++
 				window.SumFirstByteDelay += rec.FirstByteDelay
-				window.FirstByteDelaySamples = append(window.FirstByteDelaySamples, float64(rec.FirstByteDelay)/float64(time.Millisecond))
+				if retainSamples {
+					window.FirstByteDelaySamples = append(window.FirstByteDelaySamples, float64(rec.FirstByteDelay)/float64(time.Millisecond))
+				}
 			}
 			if rec.ResponseTailValid {
 				window.ResponseTailValidCount++
 				window.SumResponseTail += rec.ResponseTailTime
-				window.ResponseTailSamples = append(window.ResponseTailSamples, float64(rec.ResponseTailTime)/float64(time.Millisecond))
+				if retainSamples {
+					window.ResponseTailSamples = append(window.ResponseTailSamples, float64(rec.ResponseTailTime)/float64(time.Millisecond))
+				}
 			}
 			if rec.TotalLatencyValid {
 				window.TotalLatencyValidCount++
 				window.SumTotalLatency += rec.TotalLatency
-				window.TotalLatencySamples = append(window.TotalLatencySamples, float64(rec.TotalLatency)/float64(time.Millisecond))
+				if retainSamples {
+					window.TotalLatencySamples = append(window.TotalLatencySamples, float64(rec.TotalLatency)/float64(time.Millisecond))
+				}
 			}
 
 			// updating connection-state counts
@@ -610,10 +637,12 @@ func processAttack(
 				if rec.ConnIdleTimeValid {
 					window.ConnIdleTimeValidCount++
 					window.SumConnIdleTime += rec.ConnIdleTime
-					window.ConnIdleTimeSamples = append(
-						window.ConnIdleTimeSamples,
-						float64(rec.ConnIdleTime)/float64(time.Millisecond),
-					)
+					if retainSamples {
+						window.ConnIdleTimeSamples = append(
+							window.ConnIdleTimeSamples,
+							float64(rec.ConnIdleTime)/float64(time.Millisecond),
+						)
+					}
 				}
 			}
 
