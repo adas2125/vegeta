@@ -54,8 +54,6 @@ type RequestRecord struct {
 	WroteReqTime        time.Time
 	FirstByteTime       time.Time
 	DoneTime            time.Time
-	FireToDispatchDelay time.Duration
-	FireToDispatchValid bool
 	DispatchDelay       time.Duration
 	DispatchDelayValid  bool
 	ConnDelay           time.Duration
@@ -737,15 +735,6 @@ func (a *Attacker) hit(tr Targeter, atk *attack, rec *RequestRecord) *Result {
 
 		// update record
 		rec.DoneTime = tDone
-		if checkValidTime(rec.FireTime, rec.DispatchStart) {
-			// fire-to-dispatch delay: the time between the fire time and actual request dispatch
-			rec.FireToDispatchDelay = rec.DispatchStart.Sub(rec.FireTime)
-			rec.FireToDispatchValid = true
-		} else {
-			rec.FireToDispatchDelay = 0
-			rec.FireToDispatchValid = false
-		}
-
 		if checkValidTime(rec.WakeTime, rec.DispatchStart) {
 			// dispatch delay: the time between when the worker wakes up to process the request and when it actually makes the HTTP request (dispatch start)
 			rec.DispatchDelay = rec.DispatchStart.Sub(rec.WakeTime)
