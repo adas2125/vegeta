@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST=localhost
-PORT=8080
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+TARGET_HOST="${TARGET_HOST:-localhost}"
+TARGET_PORT="${TARGET_PORT:-5001}"
+TARGET_BASE_URL="${TARGET_BASE_URL:-http://${TARGET_HOST}:${TARGET_PORT}}"
+TARGETS_FILE="${REPO_ROOT}/targets.txt"
+TARGET_GENERATOR="${REPO_ROOT}/scripts/generate_targets.py"
+TARGET_COUNT="${TARGET_COUNT:-1800000}"
+TARGET_SEED="${TARGET_SEED:-42}"
 REF_DIR=refs_new
 SAMPLES_DIR=samples_new
-DURATION=30s
-RPS=12000
+DURATION=15s
+RPS=3000
 NUM_YES=100
 
 # Settling times
@@ -16,12 +24,21 @@ SLEEP_AFTER_YES_STOP=8
 
 mkdir -p "$REF_DIR" "$SAMPLES_DIR"
 
-TARGETS_FILE="$(mktemp)"
-printf 'POST http://%s:%s/\n' "$HOST" "$PORT" > "$TARGETS_FILE"
+if [[ ! -f "$TARGET_GENERATOR" ]]; then
+  echo "Missing target generator script: $TARGET_GENERATOR" >&2
+  exit 1
+fi
+
+echo "Generating targets file..."
+echo "Base URL: $TARGET_BASE_URL"
+python3 "$TARGET_GENERATOR" \
+  --base-url "$TARGET_BASE_URL" \
+  --count "$TARGET_COUNT" \
+  --seed "$TARGET_SEED" \
+  --output "$TARGETS_FILE"
 
 cleanup() {
   pkill -x yes || true
-  rm -f "$TARGETS_FILE"
 }
 trap cleanup EXIT
 
@@ -33,6 +50,7 @@ run_attack() {
   echo "============================================================"
   echo "Running: $label"
   echo "============================================================"
+  echo "Targets: $TARGETS_FILE"
 
   ./vegeta attack \
     -targets="$TARGETS_FILE" \
