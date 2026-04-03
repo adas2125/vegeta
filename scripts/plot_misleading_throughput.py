@@ -4,6 +4,8 @@
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -11,18 +13,50 @@ from scipy.stats import wasserstein_distance
 
 from utils import normalized_emd, safe_filename, trim_window_margins, latest_run_dir
 
-
 DEFAULT_ROOT_DIR = Path("misleading_results")
 DEFAULT_CASE_BASELINE = "well_provisioned"
 DEFAULT_CASE_ABNORMAL = "constrained"
 DEFAULT_TRIM_START_WINDOWS = 0
 DEFAULT_TRIM_END_WINDOWS = 1
+DEFAULT_REQUESTS_OUTPUT = "lg_requests_sent_comparison.pdf"
+DEFAULT_CUMULATIVE_OUTPUT = "lg_requests_sent_cumulative_only.pdf"
 
 DISTRIBUTION_METRICS = [
     "pacer_wait", "scheduler_delay", "fire_to_dispatch_delay",
     "dispatch_delay", "conn_delay", "first_byte_rtt", "first_byte_delay", 
     "response_tail_time", "total_latency", "write_delay",
 ]
+CASE_STYLES = {
+    "baseline": {
+        "color": "tab:blue",
+        "linestyle": "-",
+        "marker": "o",
+        "hatch": "////",
+    },
+    "abnormal": {
+        "color": "tab:red",
+        "linestyle": "--",
+        "marker": "s",
+        "hatch": "\\\\\\\\",
+    },
+}
+
+
+def configure_plot_style():
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": 15,
+            "axes.labelsize": 15,
+            "axes.titlesize": 17,
+            "xtick.labelsize": 13,
+            "ytick.labelsize": 13,
+            "legend.fontsize": 13,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
 
 
 def parse_args():
@@ -40,6 +74,29 @@ def parse_args():
     parser.add_argument("--abnormal-case", default=DEFAULT_CASE_ABNORMAL)
     parser.add_argument("--trim-start-windows", type=int, default=DEFAULT_TRIM_START_WINDOWS)
     parser.add_argument("--trim-end-windows", type=int, default=DEFAULT_TRIM_END_WINDOWS)
+    parser.add_argument(
+        "--requests-output",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the requests-sent comparison figure. Defaults to "
+            f"<run-dir>/{DEFAULT_REQUESTS_OUTPUT}."
+        ),
+    )
+    parser.add_argument(
+        "--cumulative-only",
+        action="store_true",
+        help="Only generate the cumulative sent-requests plot on its own.",
+    )
+    parser.add_argument(
+        "--cumulative-output",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the cumulative-only figure. Defaults to "
+            f"<run-dir>/{DEFAULT_CUMULATIVE_OUTPUT}."
+        ),
+    )
     return parser.parse_args()
 
 def load_case(run_dir, case_name, trim_start, trim_end):
@@ -119,7 +176,7 @@ def load_case(run_dir, case_name, trim_start, trim_end):
     }
 
 
-def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_name, abnormal_results):
+def save_requests_overlay(output_path, run_dir, baseline_name, baseline_results, abnormal_name, abnormal_results):
     """
     Inputs:
         - run_dir: Path to the run_* directory where the figure will be saved.
@@ -128,11 +185,14 @@ def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_nam
         - abnormal_name: Name of the abnormal case (e.g. "constrained").
         - abnormal_results: DataFrame of the abnormal case results with 'elapsed_s', 'sent_cumulative', and 'sent_rate_rps' columns.
      Outputs:
-        - Saves a figure named "lg_requests_sent_comparison.png" in the run_dir that compares the cumulative sent requests and sent rate 
+        - Saves a figure comparing the cumulative sent requests and sent rate
         over time for the baseline and abnormal cases on the same axes
     """
+    configure_plot_style()
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(3, 1, figsize=(13.5, 9.5), sharex=True, constrained_layout=True)
+    baseline_style = CASE_STYLES["baseline"]
+    abnormal_style = CASE_STYLES["abnormal"]
 
     # plotting the sent cumulative for both abnormal and normal cases on same axes
     axes[0].plot(
@@ -140,14 +200,26 @@ def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_nam
         baseline_results["sent_cumulative"],
         linewidth=2,
         label=baseline_name,
-        color="tab:blue",
+        color=baseline_style["color"],
+        linestyle=baseline_style["linestyle"],
+        marker=baseline_style["marker"],
+        markersize=4.5,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(baseline_results) // 12, 1),
     )
     axes[0].plot(
         abnormal_results["elapsed_s"],
         abnormal_results["sent_cumulative"],
         linewidth=2,
         label=abnormal_name,
-        color="tab:red",
+        color=abnormal_style["color"],
+        linestyle=abnormal_style["linestyle"],
+        marker=abnormal_style["marker"],
+        markersize=4.5,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(abnormal_results) // 12, 1),
     )
     axes[0].set_title("Load Generator Requests Sent Over Time")
     axes[0].set_ylabel("Cumulative sent")
@@ -160,14 +232,26 @@ def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_nam
         baseline_results["sent_rate_rps"],
         linewidth=1.8,
         label=f"{baseline_name} sent rate",
-        color="tab:blue",
+        color=baseline_style["color"],
+        linestyle=baseline_style["linestyle"],
+        marker=baseline_style["marker"],
+        markersize=4.2,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(baseline_results) // 12, 1),
     )
     axes[1].plot(
         abnormal_results["elapsed_s"],
         abnormal_results["sent_rate_rps"],
         linewidth=1.8,
         label=f"{abnormal_name} sent rate",
-        color="tab:red",
+        color=abnormal_style["color"],
+        linestyle=abnormal_style["linestyle"],
+        marker=abnormal_style["marker"],
+        markersize=4.2,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(abnormal_results) // 12, 1),
     )
     axes[1].set_ylabel("Sent rate (req/s)")
     axes[1].set_xlabel("Elapsed time (s)")
@@ -205,14 +289,26 @@ def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_nam
                 baseline_server["received"],
                 linewidth=1.8,
                 label=f"{baseline_name} received",
-                color="tab:blue",
+                color=baseline_style["color"],
+                linestyle=baseline_style["linestyle"],
+                marker=baseline_style["marker"],
+                markersize=4.2,
+                markerfacecolor="white",
+                markeredgewidth=1.0,
+                markevery=max(len(baseline_server) // 12, 1),
             )
             axes[2].plot(
                 abnormal_server["elapsed_s"],
                 abnormal_server["received"],
                 linewidth=1.8,
                 label=f"{abnormal_name} received",
-                color="tab:red",
+                color=abnormal_style["color"],
+                linestyle=abnormal_style["linestyle"],
+                marker=abnormal_style["marker"],
+                markersize=4.2,
+                markerfacecolor="white",
+                markeredgewidth=1.0,
+                markevery=max(len(abnormal_server) // 12, 1),
             )
             axes[2].set_ylabel("Received by server")
             axes[2].set_xlabel("Elapsed time (s)")
@@ -222,7 +318,52 @@ def save_requests_overlay(run_dir, baseline_name, baseline_results, abnormal_nam
 
 
     # finalizing and saving the figure
-    fig.savefig(run_dir / "lg_requests_sent_comparison.png", dpi=180)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_cumulative_sent_plot(output_path, baseline_name, baseline_results, abnormal_name, abnormal_results):
+    """Save just the cumulative sent requests plot as a standalone figure."""
+    configure_plot_style()
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.6, 5.0), constrained_layout=True)
+    baseline_style = CASE_STYLES["baseline"]
+    abnormal_style = CASE_STYLES["abnormal"]
+    ax.plot(
+        baseline_results["elapsed_s"],
+        baseline_results["sent_cumulative"],
+        linewidth=2.4,
+        label=baseline_name,
+        color=baseline_style["color"],
+        linestyle=baseline_style["linestyle"],
+        marker=baseline_style["marker"],
+        markersize=4.8,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(baseline_results) // 12, 1),
+    )
+    ax.plot(
+        abnormal_results["elapsed_s"],
+        abnormal_results["sent_cumulative"],
+        linewidth=2.4,
+        label=abnormal_name,
+        color=abnormal_style["color"],
+        linestyle=abnormal_style["linestyle"],
+        marker=abnormal_style["marker"],
+        markersize=4.8,
+        markerfacecolor="white",
+        markeredgewidth=1.0,
+        markevery=max(len(abnormal_results) // 12, 1),
+    )
+    ax.set_title("Load Generator Requests Sent Over Time")
+    ax.set_xlabel("Elapsed time (s)")
+    ax.set_ylabel("Cumulative sent")
+    ax.grid(alpha=0.3)
+    ax.legend(frameon=False)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -256,6 +397,8 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         a histogram and a pooled ECDF plot for the baseline and abnormal cases, along with the EMD and normalized EMD values in the title.
     """
 
+    configure_plot_style()
+
     # obtaining the window samples for both cases
     baseline_samples = baseline_data["window_samples"]
     abnormal_samples = abnormal_data["window_samples"]
@@ -288,19 +431,39 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         baseline_clipped = np.clip(baseline_values, lower, upper)
         abnormal_clipped = np.clip(abnormal_values, lower, upper)
 
-        fig = plt.figure(figsize=(16, 5))
+        fig = plt.figure(figsize=(16, 5.8))
         gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.2])
         ax_baseline = fig.add_subplot(gs[0, 0])
         ax_abnormal = fig.add_subplot(gs[0, 1], sharey=ax_baseline)
         ax_ecdf = fig.add_subplot(gs[0, 2])
 
         # plotting the histograms for both abnormal and normal cases on same axes
-        ax_baseline.hist(baseline_clipped, bins=bins, density=True, alpha=0.7, color="tab:blue")
+        _, _, baseline_patches = ax_baseline.hist(
+            baseline_clipped,
+            bins=bins,
+            density=True,
+            alpha=0.55,
+            color=CASE_STYLES["baseline"]["color"],
+            edgecolor="black",
+            linewidth=0.8,
+        )
+        for patch in baseline_patches:
+            patch.set_hatch(CASE_STYLES["baseline"]["hatch"])
         ax_baseline.set_title(f"{baseline_name} pooled")
         ax_baseline.set_xlabel("Value (ms)")
         ax_baseline.set_ylabel("Density")
 
-        ax_abnormal.hist(abnormal_clipped, bins=bins, density=True, alpha=0.7, color="tab:red")
+        _, _, abnormal_patches = ax_abnormal.hist(
+            abnormal_clipped,
+            bins=bins,
+            density=True,
+            alpha=0.55,
+            color=CASE_STYLES["abnormal"]["color"],
+            edgecolor="black",
+            linewidth=0.8,
+        )
+        for patch in abnormal_patches:
+            patch.set_hatch(CASE_STYLES["abnormal"]["hatch"])
         ax_abnormal.set_title(f"{abnormal_name} pooled")
         ax_abnormal.set_xlabel("Value (ms)")
 
@@ -309,8 +472,32 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         baseline_ecdf_y = np.arange(1, len(baseline_ecdf_x) + 1) / len(baseline_ecdf_x)
         abnormal_ecdf_x = np.sort(abnormal_values)
         abnormal_ecdf_y = np.arange(1, len(abnormal_ecdf_x) + 1) / len(abnormal_ecdf_x)
-        ax_ecdf.plot(baseline_ecdf_x, baseline_ecdf_y, color="tab:blue", linewidth=2, label=baseline_name)
-        ax_ecdf.plot(abnormal_ecdf_x, abnormal_ecdf_y, color="tab:red", linewidth=2, label=abnormal_name)
+        ax_ecdf.plot(
+            baseline_ecdf_x,
+            baseline_ecdf_y,
+            color=CASE_STYLES["baseline"]["color"],
+            linewidth=2,
+            linestyle=CASE_STYLES["baseline"]["linestyle"],
+            marker=CASE_STYLES["baseline"]["marker"],
+            markersize=4.2,
+            markerfacecolor="white",
+            markeredgewidth=1.0,
+            markevery=max(len(baseline_ecdf_x) // 12, 1),
+            label=baseline_name,
+        )
+        ax_ecdf.plot(
+            abnormal_ecdf_x,
+            abnormal_ecdf_y,
+            color=CASE_STYLES["abnormal"]["color"],
+            linewidth=2,
+            linestyle=CASE_STYLES["abnormal"]["linestyle"],
+            marker=CASE_STYLES["abnormal"]["marker"],
+            markersize=4.2,
+            markerfacecolor="white",
+            markeredgewidth=1.0,
+            markevery=max(len(abnormal_ecdf_x) // 12, 1),
+            label=abnormal_name,
+        )
         ax_ecdf.set_title("Pooled ECDF")
         ax_ecdf.set_xlabel("Value (ms)")
         ax_ecdf.set_ylabel("Probability")
@@ -319,7 +506,7 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
 
         fig.suptitle(
             f"{metric} distribution comparison\nEMD = {emd_value:.6f} | normalized EMD = {normalized_emd_value:.6f}",
-            fontsize=12,
+            fontsize=16,
         )
         fig.savefig(run_dir / f"{safe_filename(metric)}_distribution_comparison.png", dpi=180, bbox_inches="tight")
         plt.close(fig)
@@ -330,6 +517,9 @@ def main():
     run_dir = args.run_dir if args.run_dir is not None else latest_run_dir(args.root_dir)
     if not run_dir.exists():
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    requests_output = args.requests_output if args.requests_output is not None else run_dir / DEFAULT_REQUESTS_OUTPUT
+    cumulative_output = args.cumulative_output if args.cumulative_output is not None else run_dir / DEFAULT_CUMULATIVE_OUTPUT
 
     # loading the baseline and abnormal cases
     baseline_data = load_case(
@@ -346,7 +536,19 @@ def main():
     )
 
     # plotting the load generator requests sent over time for both cases on the same axes
+    if args.cumulative_only:
+        save_cumulative_sent_plot(
+            cumulative_output,
+            "Well Provisioned",
+            baseline_data["results"],
+            "Constrained",
+            abnormal_data["results"],
+        )
+        print(f"Saved cumulative-only plot to {cumulative_output}")
+        return
+
     save_requests_overlay(
+        requests_output,
         run_dir,
         args.baseline_case,
         baseline_data["results"],
