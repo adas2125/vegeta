@@ -30,6 +30,14 @@ REFERENCE_RUN_IDS = [1, 2]
 # Trimming constants
 REFERENCE_SKIP_FIRST = 2
 REFERENCE_SKIP_LAST = 1
+INTERPOLATED_EXCLUDED_METRICS = {"conn_idle_time"}
+INTERPOLATED_METRIC_LABEL_OVERRIDES = {
+    "conn_delay": "Connection Delay",
+}
+INTERPOLATED_METRIC_COLOR = "#4C78A8"
+INTERPOLATED_AXIS_LABEL_SIZE = 36
+INTERPOLATED_TICK_LABEL_SIZE = 28
+INTERPOLATED_X_TICK_LABEL_SIZE = 34
 
 
 def build_interpolated_reference_curve(
@@ -80,6 +88,31 @@ def interpolated_emd_from_neighbor_curve(
     return wasserstein1_from_quantiles(category_curve, interpolated_reference_curve, eval_grid)
 
 
+def interpolated_reference_scale(interpolated_reference_curve: np.ndarray, eval_grid: np.ndarray) -> float:
+    """
+    Compute a robust scale from the interpolated reference quantile curve.
+    """
+    q25 = float(np.interp(0.25, eval_grid, interpolated_reference_curve))
+    q75 = float(np.interp(0.75, eval_grid, interpolated_reference_curve))
+    iqr = q75 - q25
+    if iqr > base.EPSILON:
+        return iqr
+
+    std = float(np.std(interpolated_reference_curve, ddof=1)) if len(interpolated_reference_curve) > 1 else 0.0
+    if std > base.EPSILON:
+        return std
+
+    mean = float(np.mean(interpolated_reference_curve))
+    if abs(mean) > base.EPSILON:
+        return abs(mean)
+
+    max_value = float(np.max(np.abs(interpolated_reference_curve)))
+    if max_value > base.EPSILON:
+        return max_value
+
+    return 1.0
+
+
 def summarize_run_metric(
     category,
     run_id,
@@ -111,20 +144,25 @@ def summarize_run_metric(
         if interpolated_reference_curve is None or category_values.empty:
             continue
 
+        emd = (
+            0.0
+            if forced_zero_emd
+            else interpolated_emd_from_neighbor_curve(
+                interpolated_reference_curve,
+                eval_grid,
+                category_values,
+            )
+        )
+        reference_scale = interpolated_reference_scale(interpolated_reference_curve, eval_grid)
+
         rows.append(
             {
                 "category": category,
                 "run_id": run_id,
                 "metric_name": metric_name,
-                "emd": (
-                    0.0
-                    if forced_zero_emd
-                    else interpolated_emd_from_neighbor_curve(
-                        interpolated_reference_curve,
-                        eval_grid,
-                        category_values,
-                    )
-                ),
+                "emd": emd,
+                "normalized_emd": emd / reference_scale,
+                "reference_scale": reference_scale,
                 "category_mean": category_values.mean(),
                 "category_std": category_values.std(ddof=1) if len(category_values) > 1 else 0.0,
                 "category_count": len(category_values),
@@ -186,6 +224,20 @@ def analyze_category(category, run_ids):
     return pd.concat(run_frames, ignore_index=True)
 
 
+def build_plot_ready_frames(category_frames):
+    """
+    Filter out metrics we do not want to display in the interpolated overview.
+    """
+    plot_frames = {}
+    for category, frame in category_frames.items():
+        if frame.empty:
+            plot_frames[category] = frame
+            continue
+        filtered_frame = frame[~frame["metric_name"].isin(INTERPOLATED_EXCLUDED_METRICS)].copy()
+        plot_frames[category] = filtered_frame
+    return plot_frames
+
+
 if __name__ == "__main__":
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     run_ids_by_category = base.detect_run_ids()
@@ -195,8 +247,24 @@ if __name__ == "__main__":
         # get the summary stats for a specific category
         category_frames[category] = analyze_category(category, run_ids_by_category.get(category, []))
 
+    plot_frames = build_plot_ready_frames(category_frames)
+
+    base.METRIC_LABELS.update(INTERPOLATED_METRIC_LABEL_OVERRIDES)
+    for metric_name in base.SAMPLE_METRICS:
+        base.METRIC_COLORS[metric_name] = INTERPOLATED_METRIC_COLOR
+        base.METRIC_HATCHES[metric_name] = ""
+    base.AXIS_LABEL_SIZE = INTERPOLATED_AXIS_LABEL_SIZE
+    base.TICK_LABEL_SIZE = INTERPOLATED_TICK_LABEL_SIZE
+    base.X_TICK_LABEL_SIZE = INTERPOLATED_X_TICK_LABEL_SIZE
+
     # plotting
     base.plot_combined_overview(
-        category_frames,
+        plot_frames,
         OUTPUT_ROOT / "paper_attribution_overview_interpolated.pdf",
+    )
+    base.plot_combined_overview_for_column(
+        plot_frames,
+        OUTPUT_ROOT / "paper_attribution_overview_interpolated_normalized.pdf",
+        value_column="normalized_emd",
+        ylabel="Normalized EMD",
     )
