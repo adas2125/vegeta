@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import wasserstein_distance
+from matplotlib.ticker import AutoMinorLocator
 
 from utils import normalized_emd, safe_filename, trim_window_margins, latest_run_dir
 
@@ -41,20 +42,44 @@ CASE_STYLES = {
     },
 }
 
+BASE_FONT_SIZE = 23
+AXIS_LABEL_SIZE = 27
+TITLE_SIZE = 28
+TICK_LABEL_SIZE = 21
+LEGEND_SIZE = 21
+SUPTITLE_SIZE = 24
+
+
+def style_axis_grid(ax):
+    ax.set_axisbelow(True)
+    ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.grid(which="major", axis="both", color="#cfd6df", linewidth=0.9, alpha=0.9)
+    ax.grid(which="minor", axis="both", color="#e8edf3", linewidth=0.6, alpha=0.9)
+
 
 def configure_plot_style():
     plt.rcParams.update(
         {
             "font.family": "serif",
             "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-            "font.size": 15,
-            "axes.labelsize": 15,
-            "axes.titlesize": 17,
-            "xtick.labelsize": 13,
-            "ytick.labelsize": 13,
-            "legend.fontsize": 13,
+            "font.size": BASE_FONT_SIZE,
+            "axes.labelsize": AXIS_LABEL_SIZE,
+            "axes.titlesize": TITLE_SIZE,
+            "xtick.labelsize": TICK_LABEL_SIZE,
+            "ytick.labelsize": TICK_LABEL_SIZE,
+            "legend.fontsize": LEGEND_SIZE,
             "axes.spines.top": False,
             "axes.spines.right": False,
+            "axes.linewidth": 1.0,
+            "xtick.major.width": 1.0,
+            "ytick.major.width": 1.0,
+            "xtick.minor.width": 0.8,
+            "ytick.minor.width": 0.8,
+            "xtick.major.size": 5,
+            "ytick.major.size": 5,
+            "xtick.minor.size": 3,
+            "ytick.minor.size": 3,
         }
     )
 
@@ -190,7 +215,7 @@ def save_requests_overlay(output_path, run_dir, baseline_name, baseline_results,
     """
     configure_plot_style()
 
-    fig, axes = plt.subplots(3, 1, figsize=(13.5, 9.5), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(3, 1, figsize=(13.0, 11.2), sharex=True, constrained_layout=True)
     baseline_style = CASE_STYLES["baseline"]
     abnormal_style = CASE_STYLES["abnormal"]
 
@@ -198,65 +223,66 @@ def save_requests_overlay(output_path, run_dir, baseline_name, baseline_results,
     axes[0].plot(
         baseline_results["elapsed_s"],
         baseline_results["sent_cumulative"],
-        linewidth=2,
+        linewidth=3.0,
         label=baseline_name,
         color=baseline_style["color"],
         linestyle=baseline_style["linestyle"],
         marker=baseline_style["marker"],
-        markersize=4.5,
+        markersize=6.0,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(baseline_results) // 12, 1),
     )
     axes[0].plot(
         abnormal_results["elapsed_s"],
         abnormal_results["sent_cumulative"],
-        linewidth=2,
+        linewidth=3.0,
         label=abnormal_name,
         color=abnormal_style["color"],
         linestyle=abnormal_style["linestyle"],
         marker=abnormal_style["marker"],
-        markersize=4.5,
+        markersize=6.0,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(abnormal_results) // 12, 1),
     )
-    axes[0].set_title("Load Generator Requests Sent Over Time")
+    # axes[0].set_title("Load Generator Requests Sent Over Time", loc="left", pad=10)
     axes[0].set_ylabel("Cumulative sent")
-    axes[0].grid(alpha=0.3)
-    axes[0].legend()
+    style_axis_grid(axes[0])
+    axes[0].legend(frameon=False, handlelength=3.0)
 
     # plotting the sent rate for both abnormal and normal cases on same axes
     axes[1].plot(
         baseline_results["elapsed_s"],
         baseline_results["sent_rate_rps"],
-        linewidth=1.8,
+        linewidth=2.8,
         label=f"{baseline_name} sent rate",
         color=baseline_style["color"],
         linestyle=baseline_style["linestyle"],
         marker=baseline_style["marker"],
-        markersize=4.2,
+        markersize=5.8,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(baseline_results) // 12, 1),
     )
     axes[1].plot(
         abnormal_results["elapsed_s"],
         abnormal_results["sent_rate_rps"],
-        linewidth=1.8,
+        linewidth=2.8,
         label=f"{abnormal_name} sent rate",
         color=abnormal_style["color"],
         linestyle=abnormal_style["linestyle"],
         marker=abnormal_style["marker"],
-        markersize=4.2,
+        markersize=5.8,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(abnormal_results) // 12, 1),
     )
+    # axes[1].set_title("Load Generator Send Rate Over Time", loc="left", pad=10)
     axes[1].set_ylabel("Sent rate (req/s)")
     axes[1].set_xlabel("Elapsed time (s)")
-    axes[1].grid(alpha=0.3)
-    axes[1].legend()
+    style_axis_grid(axes[1])
+    axes[1].legend(frameon=False, handlelength=3.0)
 
     # plotting the number of requests received by the server for both abnormal and normal cases on same axes
     server_log_baseline = run_dir / f"{baseline_name}" / f"{baseline_name}_server.log"
@@ -287,39 +313,39 @@ def save_requests_overlay(output_path, run_dir, baseline_name, baseline_results,
             axes[2].plot(
                 baseline_server["elapsed_s"],
                 baseline_server["received"],
-                linewidth=1.8,
+                linewidth=2.8,
                 label=f"{baseline_name} received",
                 color=baseline_style["color"],
                 linestyle=baseline_style["linestyle"],
                 marker=baseline_style["marker"],
-                markersize=4.2,
+                markersize=5.8,
                 markerfacecolor="white",
-                markeredgewidth=1.0,
+                markeredgewidth=1.2,
                 markevery=max(len(baseline_server) // 12, 1),
             )
             axes[2].plot(
                 abnormal_server["elapsed_s"],
                 abnormal_server["received"],
-                linewidth=1.8,
+                linewidth=2.8,
                 label=f"{abnormal_name} received",
                 color=abnormal_style["color"],
                 linestyle=abnormal_style["linestyle"],
                 marker=abnormal_style["marker"],
-                markersize=4.2,
+                markersize=5.8,
                 markerfacecolor="white",
-                markeredgewidth=1.0,
+                markeredgewidth=1.2,
                 markevery=max(len(abnormal_server) // 12, 1),
             )
             axes[2].set_ylabel("Received by server")
             axes[2].set_xlabel("Elapsed time (s)")
-            axes[2].set_title("Requests Received by Server Over Time")
-            axes[2].grid(alpha=0.3)
-            axes[2].legend()
+            axes[2].set_title("Requests Received by Server Over Time", loc="left", pad=10)
+            style_axis_grid(axes[2])
+            axes[2].legend(frameon=False, handlelength=3.0)
 
 
     # finalizing and saving the figure
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
 
@@ -327,43 +353,43 @@ def save_cumulative_sent_plot(output_path, baseline_name, baseline_results, abno
     """Save just the cumulative sent requests plot as a standalone figure."""
     configure_plot_style()
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.6, 5.0), constrained_layout=True)
+    fig, ax = plt.subplots(1, 1, figsize=(8.4, 5.8), constrained_layout=True)
     baseline_style = CASE_STYLES["baseline"]
     abnormal_style = CASE_STYLES["abnormal"]
     ax.plot(
         baseline_results["elapsed_s"],
         baseline_results["sent_cumulative"],
-        linewidth=2.4,
+        linewidth=3.0,
         label=baseline_name,
         color=baseline_style["color"],
         linestyle=baseline_style["linestyle"],
         marker=baseline_style["marker"],
-        markersize=4.8,
+        markersize=6.0,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(baseline_results) // 12, 1),
     )
     ax.plot(
         abnormal_results["elapsed_s"],
         abnormal_results["sent_cumulative"],
-        linewidth=2.4,
+        linewidth=3.0,
         label=abnormal_name,
         color=abnormal_style["color"],
         linestyle=abnormal_style["linestyle"],
         marker=abnormal_style["marker"],
-        markersize=4.8,
+        markersize=6.0,
         markerfacecolor="white",
-        markeredgewidth=1.0,
+        markeredgewidth=1.2,
         markevery=max(len(abnormal_results) // 12, 1),
     )
-    ax.set_title("Load Generator Requests Sent Over Time")
+    # ax.set_title("Load Generator Requests Sent Over Time", loc="left", pad=10)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Cumulative sent")
-    ax.grid(alpha=0.3)
-    ax.legend(frameon=False)
+    style_axis_grid(ax)
+    ax.legend(frameon=False, handlelength=3.0)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight")
+    fig.savefig(output_path, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
 
 
@@ -431,7 +457,7 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         baseline_clipped = np.clip(baseline_values, lower, upper)
         abnormal_clipped = np.clip(abnormal_values, lower, upper)
 
-        fig = plt.figure(figsize=(16, 5.8))
+        fig = plt.figure(figsize=(16.8, 6.8))
         gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.2])
         ax_baseline = fig.add_subplot(gs[0, 0])
         ax_abnormal = fig.add_subplot(gs[0, 1], sharey=ax_baseline)
@@ -449,9 +475,10 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         )
         for patch in baseline_patches:
             patch.set_hatch(CASE_STYLES["baseline"]["hatch"])
-        ax_baseline.set_title(f"{baseline_name} pooled")
+        ax_baseline.set_title(f"{baseline_name} pooled", loc="left", pad=10)
         ax_baseline.set_xlabel("Value (ms)")
         ax_baseline.set_ylabel("Density")
+        style_axis_grid(ax_baseline)
 
         _, _, abnormal_patches = ax_abnormal.hist(
             abnormal_clipped,
@@ -464,8 +491,9 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
         )
         for patch in abnormal_patches:
             patch.set_hatch(CASE_STYLES["abnormal"]["hatch"])
-        ax_abnormal.set_title(f"{abnormal_name} pooled")
+        ax_abnormal.set_title(f"{abnormal_name} pooled", loc="left", pad=10)
         ax_abnormal.set_xlabel("Value (ms)")
+        style_axis_grid(ax_abnormal)
 
         # plotting the ECDFs for both abnormal and normal cases on same axes
         baseline_ecdf_x = np.sort(baseline_values)
@@ -476,12 +504,12 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
             baseline_ecdf_x,
             baseline_ecdf_y,
             color=CASE_STYLES["baseline"]["color"],
-            linewidth=2,
+            linewidth=2.8,
             linestyle=CASE_STYLES["baseline"]["linestyle"],
             marker=CASE_STYLES["baseline"]["marker"],
-            markersize=4.2,
+            markersize=5.8,
             markerfacecolor="white",
-            markeredgewidth=1.0,
+            markeredgewidth=1.2,
             markevery=max(len(baseline_ecdf_x) // 12, 1),
             label=baseline_name,
         )
@@ -489,26 +517,31 @@ def save_distribution_comparisons(run_dir, baseline_name, baseline_data, abnorma
             abnormal_ecdf_x,
             abnormal_ecdf_y,
             color=CASE_STYLES["abnormal"]["color"],
-            linewidth=2,
+            linewidth=2.8,
             linestyle=CASE_STYLES["abnormal"]["linestyle"],
             marker=CASE_STYLES["abnormal"]["marker"],
-            markersize=4.2,
+            markersize=5.8,
             markerfacecolor="white",
-            markeredgewidth=1.0,
+            markeredgewidth=1.2,
             markevery=max(len(abnormal_ecdf_x) // 12, 1),
             label=abnormal_name,
         )
-        ax_ecdf.set_title("Pooled ECDF")
+        ax_ecdf.set_title("Pooled ECDF", loc="left", pad=10)
         ax_ecdf.set_xlabel("Value (ms)")
         ax_ecdf.set_ylabel("Probability")
-        ax_ecdf.grid(True, alpha=0.3)
-        ax_ecdf.legend()
+        style_axis_grid(ax_ecdf)
+        ax_ecdf.legend(frameon=False, handlelength=3.0)
 
         fig.suptitle(
             f"{metric} distribution comparison\nEMD = {emd_value:.6f} | normalized EMD = {normalized_emd_value:.6f}",
-            fontsize=16,
+            fontsize=SUPTITLE_SIZE,
         )
-        fig.savefig(run_dir / f"{safe_filename(metric)}_distribution_comparison.png", dpi=180, bbox_inches="tight")
+        fig.savefig(
+            run_dir / f"{safe_filename(metric)}_distribution_comparison.png",
+            dpi=180,
+            bbox_inches="tight",
+            pad_inches=0.04,
+        )
         plt.close(fig)
 
 

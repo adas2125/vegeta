@@ -3,18 +3,41 @@
 import csv
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
 RPS = 3000
 MEAN_DELAY_S = 0.050
+BASE_FONT_SIZE = 23
+AXIS_LABEL_SIZE = 27
+TICK_LABEL_SIZE = 21
+LEGEND_SIZE = 21
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path("archive")
 FILES = {
     "Exponential": ROOT / "results_exp.csv",
-    "Fixed": ROOT / "results_fixed.csv",
-    "Failed case": ROOT / "results_bad.csv",
+    # "Fixed": ROOT / "results_fixed.csv",
+    # "Failed case": ROOT / "results_bad.csv",
 }
+
+
+def configure_plot_style() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": BASE_FONT_SIZE,
+            "axes.labelsize": AXIS_LABEL_SIZE,
+            "xtick.labelsize": TICK_LABEL_SIZE,
+            "ytick.labelsize": TICK_LABEL_SIZE,
+            "legend.fontsize": LEGEND_SIZE,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
 
 
 def load_series(path: Path) -> tuple[list[float], list[int]]:
@@ -31,6 +54,8 @@ def load_series(path: Path) -> tuple[list[float], list[int]]:
 
 
 def main() -> None:
+    configure_plot_style()
+
     # Little's Law expected in-flight count
     expected_in_flight = RPS * MEAN_DELAY_S
 
@@ -76,30 +101,22 @@ def main() -> None:
         linewidth=1.2,
         label=f"Exp approx +2σ ({exp_upper_2sigma:.1f})",
     )
-    # plt.axhline(
-    #     exp_lower_3sigma,
-    #     color="tab:red",
-    #     linestyle=":",
-    #     linewidth=1.2,
-    #     label=f"Exp approx -3σ ({exp_lower_3sigma:.1f})",
-    # )
-    # plt.axhline(
-    #     exp_upper_3sigma,
-    #     color="tab:red",
-    #     linestyle=":",
-    #     linewidth=1.2,
-    #     label=f"Exp approx +3σ ({exp_upper_3sigma:.1f})",
-    # )
 
-    plt.title("In-Flight Requests Over Time")
+    # plt.title("In-Flight Requests Over Time")
     plt.xlabel("Elapsed time (s)")
     plt.ylabel("In-flight requests")
     plt.grid(True, alpha=0.3)
     # set the y-axis limits to show the reference bands clearly
-    plt.ylim(0, exp_upper_3sigma * 1.5)
-    plt.legend()
+    plt.ylim(0, exp_upper_2sigma * 1.5)
+    plt.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        frameon=False,
+        ncol=2,
+    )
     plt.tight_layout()
-    plt.show()
+    # save as pdf for high-quality vector output
+    plt.savefig("inflight_littles_law.pdf")
 
 
 if __name__ == "__main__":
