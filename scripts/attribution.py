@@ -93,6 +93,7 @@ LEGEND_SIZE = 24
 PANEL_LABEL_SIZE = 28
 X_TICK_LABEL_SIZE = 30
 X_AXIS_LABEL_SIZE = 34
+EPSILON = 1e-12
 
 
 def configure_plot_style():
@@ -110,6 +111,25 @@ def configure_plot_style():
             "axes.spines.right": False,
         }
     )
+
+
+def compute_reference_scale(reference_values):
+    """
+    Compute a robust scale for normalizing EMD across metrics.
+    """
+    if len(reference_values) == 0:
+        return 1.0
+
+    reference_array = np.asarray(reference_values, dtype=float)
+    q75, q25 = np.percentile(reference_array, [75, 25])
+    iqr = q75 - q25
+    if iqr > EPSILON:
+        # print(f"Using IQR as reference scale: {iqr:.4f}")
+        return float(iqr)
+    
+    # exit with a warning if we can't compute a meaningful scale
+    print(f"Warning: IQR is too small")
+    exit(1)
 
 
 def load_run_samples(category, run_id, trim=True):
@@ -254,15 +274,20 @@ def summarize_run_metric(category, run_id, reference_keys, reference_samples):
         if reference_values.empty or category_values.empty:
             continue
 
+        emd = 0.0 if forced_zero_emd else wasserstein_distance(reference_values, category_values)
+        reference_scale = compute_reference_scale(reference_values)
+
         # save the summary for this metric and run
         rows.append(
             {
                 "category": category,
                 "run_id": run_id,
                 "metric_name": metric_name,
-                "emd": 0.0 if forced_zero_emd else wasserstein_distance(reference_values, category_values),
+                "emd": emd,
+                "normalized_emd": emd / reference_scale,
                 "reference_mean": reference_values.mean(),
                 "reference_std": reference_values.std(ddof=1),
+                "reference_scale": reference_scale,
                 "category_mean": category_values.mean(),
                 "category_std": category_values.std(ddof=1) if len(category_values) > 1 else 0.0,
                 "reference_count": len(reference_values),
@@ -275,9 +300,9 @@ def summarize_run_metric(category, run_id, reference_keys, reference_samples):
     return pd.DataFrame(rows)
 
 
-def aggregate_metric_emd(summary_df):
+def aggregate_metric_emd(summary_df, value_column="emd"):
     """
-    From the summary, calculates average EMD and stddev for each metric across runs
+    From the summary, calculates average attribution score and stddev for each metric across runs
     """
 
     if summary_df.empty:
@@ -286,9 +311,9 @@ def aggregate_metric_emd(summary_df):
     agg_df = (
         summary_df.groupby("metric_name", as_index=False)
         .agg(
-            emd_mean=("emd", "mean"),   # average EMD across runs for this metric
-            emd_std=("emd", lambda vals: vals.std(ddof=1) if len(vals) > 1 else 0.0),   # stddev of EMD across runs for this metric
-            run_count=("run_id", "nunique"),    # how many runs contributed to this metric's EMD calculation
+            emd_mean=(value_column, "mean"),   # average score across runs for this metric
+            emd_std=(value_column, lambda vals: vals.std(ddof=1) if len(vals) > 1 else 0.0),   # stddev across runs for this metric
+            run_count=("run_id", "nunique"),    # how many runs contributed to this metric's score calculation
         )
         .set_index("metric_name")
         .reindex(SAMPLE_METRICS)
@@ -337,6 +362,42 @@ def draw_category_panel(ax, summary_df, category, show_ylabel):
     ax.spines["right"].set_visible(False)
 
 
+def draw_category_panel_for_column(ax, summary_df, category, show_ylabel, value_column, ylabel):
+    metric_df = aggregate_metric_emd(summary_df, value_column=value_column)
+    x = np.arange(len(metric_df), dtype=float)
+
+    bars = ax.bar(
+        x,
+        metric_df["emd_mean"],
+        width=0.68,
+        color=[METRIC_COLORS[metric_name] for metric_name in metric_df["metric_name"]],
+        edgecolor="black",
+        linewidth=1.0,
+        yerr=metric_df["emd_std"],
+        capsize=3.0,
+        error_kw={"elinewidth": 0.9, "alpha": 0.85, "capthick": 0.9},
+    )
+    for bar, metric_name in zip(bars, metric_df["metric_name"]):
+        bar.set_hatch(METRIC_HATCHES.get(metric_name, ""))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [METRIC_LABELS.get(metric_name, metric_name) for metric_name in metric_df["metric_name"]],
+        rotation=0,
+        ha="center",
+        fontsize=X_TICK_LABEL_SIZE,
+        fontweight="bold",
+    )
+    ax.tick_params(axis="x", pad=10)
+    if show_ylabel:
+        ax.set_ylabel(ylabel, fontsize=AXIS_LABEL_SIZE)
+    ax.set_title(CATEGORY_TITLES.get(category, category), fontsize=TITLE_SIZE, pad=12)
+    ax.grid(True, axis="y", alpha=0.22, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
 def plot_combined_overview(category_frames, output_path):
     configure_plot_style()
     available_categories = [
@@ -364,6 +425,48 @@ def plot_combined_overview(category_frames, output_path):
             category_frames[category],
             category,
             show_ylabel=(idx == 0),
+        )
+        ax.text(
+            0.01,
+            1.03,
+            f"{chr(ord('a') + idx)})",
+            transform=ax.transAxes,
+            fontsize=PANEL_LABEL_SIZE,
+            fontweight="bold",
+        )
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def plot_combined_overview_for_column(category_frames, output_path, value_column, ylabel):
+    configure_plot_style()
+    available_categories = [
+        category
+        for category in OVERVIEW_CATEGORIES
+        if category in category_frames and not category_frames[category].empty
+    ]
+    if not available_categories:
+        return
+
+    fig, axes = plt.subplots(
+        1,
+        len(available_categories),
+        figsize=(10.5 * len(available_categories), 9.2),
+        constrained_layout=True,
+        sharex=True,
+        sharey=True,
+    )
+    if len(available_categories) == 1:
+        axes = [axes]
+
+    for idx, (ax, category) in enumerate(zip(axes, available_categories)):
+        draw_category_panel_for_column(
+            ax,
+            category_frames[category],
+            category,
+            show_ylabel=(idx == 0),
+            value_column=value_column,
+            ylabel=ylabel,
         )
         ax.text(
             0.01,
@@ -481,9 +584,9 @@ def plot_observed_r_over_time(category_run_ids, output_path):
                 alpha=0.12,
             )
 
-    ax.set_xlabel("Time since trimmed run start (s)")
-    ax.set_ylabel("Observed R")
-    ax.set_title("Observed R over time across categories", fontsize=TITLE_SIZE, pad=12)
+    ax.set_xlabel("Time since trimmed run start (s)", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Observed ρ", fontsize=AXIS_LABEL_SIZE)
+    # ax.set_title("Observed R over time across categories", fontsize=TITLE_SIZE, pad=12)
     ax.grid(True, alpha=0.22, linewidth=0.8)
     ax.set_axisbelow(True)
     ax.spines["top"].set_visible(False)
@@ -544,6 +647,12 @@ def main():
         category_frames[category] = analyze_category(category, run_ids_by_category.get(category, []))
 
     plot_combined_overview(category_frames, OUTPUT_ROOT / "paper_attribution_overview.pdf")
+    plot_combined_overview_for_column(
+        category_frames,
+        OUTPUT_ROOT / "paper_attribution_overview_normalized.pdf",
+        value_column="normalized_emd",
+        ylabel="Mean normalized EMD vs reference",
+    )
     plot_observed_r_over_time(run_ids_by_category, OUTPUT_ROOT / "observed_r_over_time.pdf")
 
 
