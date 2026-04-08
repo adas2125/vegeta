@@ -73,7 +73,6 @@ func attackCmd() command {
 	fs.StringVar(&opts.metricsCSV, "metrics-csv", "results.csv", "CSV file path for runtime attack metrics (e.g. workers, connections, in-flight, completions over time)")
 	fs.StringVar(&opts.windowCSV, "window-csv", "window_results.csv", "CSV file path for windowed trace metrics including delay & latency metrics, achieved rate, observed R, and Little's Law violation flag computed for each window")
 	fs.StringVar(&opts.windowSamplesCSV, "window-samples-csv", "window_samples.csv", "CSV file path for windowed trace metric samples used to plot distributions")
-	fs.StringVar(&opts.baselineReferenceCSV, "baseline-reference-csv", "", "CSV file path for baseline Little's Law reference data; must be provided for Little's Law check to be performed")
 	fs.StringVar(&opts.referenceCSVPath, "reference-csv-path", "", "CSV file path for computed baseline latency for R metric computation")
 	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
 	fs.DurationVar(&opts.sampleInterval, "sample-interval", 10*time.Millisecond, "Sampling interval for windowed trace metrics (in-flight), must be less than or equal to metrics-interval")
@@ -125,7 +124,6 @@ type attackOpts struct {
 	metricsCSV            string
 	windowCSV             string
 	windowSamplesCSV      string
-	baselineReferenceCSV  string
 	metricsInterval       time.Duration
 	sampleInterval        time.Duration
 	windowSampleRetention float64
@@ -232,10 +230,7 @@ type windowSamplesCSVWriter struct {
 
 type littleLawReference struct {
 	targetRPS       float64
-	baselineRPS     float64
 	baselineLatency time.Duration
-	p01NormalR      float64 // p01NormalR & p99NormalR are computed from reference-csv-path (referenceCSVPath)
-	p99NormalR      float64
 }
 
 // attack validates the attack arguments, sets up the
@@ -337,18 +332,11 @@ func attack(opts *attackOpts) (err error) {
 		go srv.ListenAndServe()
 	}
 
-	// loading the baseline reference CSV for Little's Law check if provided
-	var llRef *littleLawReference
 	targetRPS := targetRatePerSecond(opts.rate)
-	if opts.baselineReferenceCSV != "" && opts.rate.Freq > 0 {
-		llRef, err = loadLittleLawReference(opts.baselineReferenceCSV, targetRPS)
-		if err != nil {
-			return err
-		}
-	}
 
 	// If a reference CSV is provided, use the average window latency from that
 	// file as the baseline latency for ObservedR calculations.
+	var llRef *littleLawReference
 	if opts.referenceCSVPath != "" && targetRPS > 0 {
 		baselineLatency, err := loadAverageLatencyFromReferenceCSV(opts.referenceCSVPath)
 		if err != nil {
@@ -804,98 +792,6 @@ func targetRatePerSecond(rate vegeta.Rate) float64 {
 	return float64(rate.Freq) / rate.Per.Seconds()
 }
 
-func loadLittleLawReference(baselinePath string, targetRPS float64) (*littleLawReference, error) {
-	/*
-		Loads the baseline reference CSV for Little's Law check and returns the closest matching row to the target RPS
-	*/
-
-	// opening the provided CSV
-	f, err := os.Open(baselinePath)
-	if err != nil {
-		return nil, fmt.Errorf("error opening baseline reference CSV %s: %s", baselinePath, err)
-	}
-	defer f.Close()
-
-	// reading the CSV and validating its structure
-	rows, err := csv.NewReader(f).ReadAll()
-	if err != nil {
-		return nil, fmt.Errorf("error reading baseline reference CSV %s: %s", baselinePath, err)
-	}
-	if len(rows) < 2 {
-		return nil, fmt.Errorf("baseline reference CSV %s has no data rows", baselinePath)
-	}
-
-	// mapping the header columns to their indices
-	header := map[string]int{}
-	for i, col := range rows[0] {
-		header[col] = i
-	}
-
-	// validating that the required columns are present in the CSV
-	required := []string{"rps", "avg_total_latency_ms_mean", "p01_normal_r", "p99_normal_r"}
-	for _, col := range required {
-		if _, ok := header[col]; !ok {
-			return nil, fmt.Errorf("baseline reference CSV %s is missing required column %q", baselinePath, col)
-		}
-	}
-
-	var (
-		best         *littleLawReference
-		bestDistance = math.MaxFloat64
-		globalLower  = math.MaxFloat64
-		globalUpper  = -math.MaxFloat64
-	)
-
-	for _, row := range rows[1:] {
-
-		// obtaining the RPS, average total latency, and average in-flight standard deviation from the CSV row
-		rps, err := strconv.ParseFloat(row[header["rps"]], 64)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing rps %q in %s: %s", row[header["rps"]], baselinePath, err)
-		}
-		// latency is the average across all the windows for the given RPS
-		latencyMS, err := strconv.ParseFloat(row[header["avg_total_latency_ms_mean"]], 64)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing avg_total_latency_ms_mean %q in %s: %s", row[header["avg_total_latency_ms_mean"]], baselinePath, err)
-		}
-		p01R, err := strconv.ParseFloat(row[header["p01_normal_r"]], 64)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing p01_normal_r %q in %s: %s", row[header["p01_normal_r"]], baselinePath, err)
-		}
-		p99R, err := strconv.ParseFloat(row[header["p99_normal_r"]], 64)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing p99_normal_r %q in %s: %s", row[header["p99_normal_r"]], baselinePath, err)
-		}
-
-		// distance from the target RPS to the current row's RPS
-		distance := math.Abs(rps - targetRPS)
-		if best == nil || distance < bestDistance {
-			best = &littleLawReference{
-				targetRPS:       targetRPS,
-				baselineRPS:     rps,
-				baselineLatency: time.Duration(latencyMS * float64(time.Millisecond)),
-			}
-			bestDistance = distance
-		}
-
-		// --- global envelope (GLOBAL) ---
-		if p01R < globalLower {
-			globalLower = p01R
-		}
-		if p99R > globalUpper {
-			globalUpper = p99R
-		}
-	}
-
-	if best == nil {
-		return nil, fmt.Errorf("baseline reference CSV %s has no usable baseline rows", baselinePath)
-	}
-
-	best.p01NormalR = globalLower
-	best.p99NormalR = globalUpper
-	return best, nil
-}
-
 func extractRPS(path string) (int, error) {
 	base := filepath.Base(path) // eval_rps10000.csv
 
@@ -1000,7 +896,11 @@ func applyObservedR(summary *windowSummary, llRef *littleLawReference) {
 }
 
 func applyLittleLawCheck(summary *windowSummary, llRef *littleLawReference) {
-	if llRef == nil || !math.IsNaN(summary.ObservedR) {
+	if math.IsNaN(summary.ObservedR) {
+		return
+	}
+
+	if llRef == nil {
 		lower := 0.95
 		upper := 1.10
 		fmt.Fprintf(
@@ -1031,32 +931,10 @@ func applyLittleLawCheck(summary *windowSummary, llRef *littleLawReference) {
 				summary.LittleLawViolation = false
 			}
 		}
-
-	} else if llRef != nil && !math.IsNaN(summary.ObservedR) {
-		// experimentally set values
-		lower := math.Min(llRef.p01NormalR, 0.95)
-		upper := math.Max(llRef.p99NormalR, 1.10)
-
-		summary.LittleLawViolation = summary.ObservedR < lower || summary.ObservedR > upper
-
-		if summary.LittleLawViolation {
-			fmt.Fprintf(
-				os.Stderr,
-				"Little's Law violation: observed R=%.6f outside [%.6f, %.6f]\n",
-				summary.ObservedR,
-				lower,
-				upper,
-			)
-		} else {
-			fmt.Fprintf(
-				os.Stderr,
-				"Little's Law check passed: observed R=%.6f within [%.6f, %.6f]\n",
-				summary.ObservedR,
-				lower,
-				upper,
-			)
-		}
+		return
 	}
+
+	summary.LittleLawViolation = false
 }
 
 // defining writer structs for metrics CSV and windowed trace CSV
