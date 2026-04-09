@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,6 +27,73 @@ import (
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 	prom "github.com/tsenart/vegeta/v12/lib/prom"
 )
+
+// AnomalyPayload is the struct of the payload emitted at the end of each window
+type AnomalyPayload struct {
+	Rho              float64   `json:"rho"`
+	WindowStart      int       `json:"window_start"`
+	PacerDelays      []float64 `json:"PacerDelays"`
+	SchedulerDelays  []float64 `json:"SchedulerDelays"`
+	ConnectionDelays []float64 `json:"ConnectionDelays"`
+}
+
+// emits the anomaly payload to a channel
+var anomalyPayloadCh = make(chan AnomalyPayload, 128)
+
+func init() {
+	go func() {
+		for payload := range anomalyPayloadCh {
+
+			// reads payload from the channel, marshal to JSON, emit to stdout
+			body, err := json.Marshal(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to marshal anomaly payload: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(os.Stdout, "XLG-WINDOW:%s\n", body)
+		}
+	}()
+}
+
+func emitAnomalyPayload(payload AnomalyPayload) {
+	// non-blocking send to the channel
+	select {
+	case anomalyPayloadCh <- payload:
+	default:
+		// if the channel is full, we drop the payload to avoid blocking the attack processing
+	}
+}
+
+func cloneFloat64s(values []float64) []float64 {
+	if len(values) == 0 {
+		return nil
+	}
+
+	// safe copy of slices
+	cloned := make([]float64, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+func emitWindowAnomalyPayload(window *WindowStats, summary windowSummary) {
+
+	// obtain the rho value from the window summary
+	rho := summary.ObservedR
+
+	// if it's not defined, set to -1
+	if math.IsNaN(rho) || math.IsInf(rho, 0) {
+		rho = -1
+	}
+
+	// emit the payload
+	emitAnomalyPayload(AnomalyPayload{
+		Rho:              rho,
+		WindowStart:      int(window.Start.UnixMilli()),
+		PacerDelays:      cloneFloat64s(window.PacerWaitSamples),
+		SchedulerDelays:  cloneFloat64s(window.SchedulerDelaySamples),
+		ConnectionDelays: cloneFloat64s(window.ConnDelaySamples),
+	})
+}
 
 func attackCmd() command {
 	fs := flag.NewFlagSet("vegeta attack", flag.ExitOnError)
@@ -72,7 +140,7 @@ func attackCmd() command {
 	// custom added flags
 	fs.StringVar(&opts.metricsCSV, "metrics-csv", "results.csv", "CSV file path for runtime attack metrics (e.g. workers, connections, in-flight, completions over time)")
 	fs.StringVar(&opts.windowCSV, "window-csv", "window_results.csv", "CSV file path for windowed trace metrics including delay & latency metrics, achieved rate, observed R, and Little's Law violation flag computed for each window")
-	fs.StringVar(&opts.windowSamplesCSV, "window-samples-csv", "window_samples.csv", "CSV file path for windowed trace metric samples used to plot distributions")
+	fs.StringVar(&opts.windowSamplesCSV, "window-samples-csv", "", "CSV file path for windowed trace metric samples used to plot distributions [empty = disabled]")
 	fs.StringVar(&opts.referenceCSVPath, "reference-csv-path", "", "CSV file path for computed baseline latency for R metric computation")
 	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
 	fs.DurationVar(&opts.sampleInterval, "sample-interval", 10*time.Millisecond, "Sampling interval for windowed trace metrics (in-flight), must be less than or equal to metrics-interval")
@@ -482,6 +550,9 @@ func processAttack(
 						return nil
 					}
 
+					// on a window tick, report the anomaly payload for the window
+					emitWindowAnomalyPayload(window, summary)
+
 					// write the window samples to the CSV file if provided
 					if sw != nil {
 						if err := sw.WriteWindowSamples(window); err != nil {
@@ -523,6 +594,9 @@ func processAttack(
 					if !hasAnySamples {
 						return nil
 					}
+					
+					// to ensure no data loss at the end, emit for final window
+					emitWindowAnomalyPayload(window, summary)
 
 					// write the window samples to the CSV file if provided
 					if sw != nil {
@@ -667,6 +741,8 @@ func processAttack(
 				window = &WindowStats{Start: time.Now()}
 				continue
 			}
+
+			emitWindowAnomalyPayload(window, summary)
 
 			// write the window samples to the CSV file if provided
 			if sw != nil {
