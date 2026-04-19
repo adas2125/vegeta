@@ -142,6 +142,7 @@ func attackCmd() command {
 	fs.StringVar(&opts.windowCSV, "window-csv", "window_results.csv", "CSV file path for windowed trace metrics including delay & latency metrics, achieved rate, observed R, and Little's Law violation flag computed for each window")
 	fs.StringVar(&opts.windowSamplesCSV, "window-samples-csv", "", "CSV file path for windowed trace metric samples used to plot distributions [empty = disabled]")
 	fs.StringVar(&opts.referenceCSVPath, "reference-csv-path", "", "CSV file path for computed baseline latency for R metric computation")
+	fs.BoolVar(&opts.xlgInspector, "xlg-inspector", true, "Emit XLG-WINDOW telemetry to stdout for the XLG Inspector")
 	fs.DurationVar(&opts.metricsInterval, "metrics-interval", time.Second, "Sampling interval for runtime metrics CSV")
 	fs.DurationVar(&opts.sampleInterval, "sample-interval", 10*time.Millisecond, "Sampling interval for windowed trace metrics (in-flight), must be less than or equal to metrics-interval")
 	fs.Float64Var(&opts.windowSampleRetention, "window-sample-retention", 1.0, "Fraction of request trace samples to retain for per-window distribution outputs [0.0-1.0]")
@@ -196,6 +197,7 @@ type attackOpts struct {
 	sampleInterval        time.Duration
 	windowSampleRetention float64
 	referenceCSVPath      string
+	xlgInspector          bool
 	dnsTTL                time.Duration
 	sessionTickets        bool
 	connectTo             map[string][]string
@@ -473,7 +475,7 @@ func attack(opts *attackOpts) (err error) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, opts.windowSampleRetention, traces)
+	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, opts.windowSampleRetention, opts.xlgInspector, traces)
 }
 
 func hasAnyValidSamples(window *WindowStats) bool {
@@ -501,6 +503,7 @@ func processAttack(
 	metricsInterval time.Duration,
 	sampleInterval time.Duration,
 	windowSampleRetention float64,
+	xlgInspector bool,
 	traces <-chan *vegeta.RequestRecord,
 ) error {
 
@@ -551,7 +554,9 @@ func processAttack(
 					}
 
 					// on a window tick, report the anomaly payload for the window
-					emitWindowAnomalyPayload(window, summary)
+					if xlgInspector {
+						emitWindowAnomalyPayload(window, summary)
+					}
 
 					// write the window samples to the CSV file if provided
 					if sw != nil {
@@ -594,9 +599,11 @@ func processAttack(
 					if !hasAnySamples {
 						return nil
 					}
-					
+
 					// to ensure no data loss at the end, emit for final window
-					emitWindowAnomalyPayload(window, summary)
+					if xlgInspector {
+						emitWindowAnomalyPayload(window, summary)
+					}
 
 					// write the window samples to the CSV file if provided
 					if sw != nil {
@@ -742,7 +749,9 @@ func processAttack(
 				continue
 			}
 
-			emitWindowAnomalyPayload(window, summary)
+			if xlgInspector {
+				emitWindowAnomalyPayload(window, summary)
+			}
 
 			// write the window samples to the CSV file if provided
 			if sw != nil {
