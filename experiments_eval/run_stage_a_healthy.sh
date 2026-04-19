@@ -6,10 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # these are the defaults
-DURATION="${DURATION:-15s}"
+DURATION="${DURATION:-10s}"
 RATE="${RATE:-${BASELINE_RPS:-4000}}"
 NUM_HEALTHY_RUNS="${NUM_HEALTHY_RUNS:-2}"
-BASELINE_MEAN_DELAY="${BASELINE_MEAN_DELAY:-${FIXED_DELAY:-10ms}}"
 
 # creating output directory for this experiment
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -18,14 +17,11 @@ STAGE_A_DIR="${STAGE_A_DIR:-${OUTPUT_ROOT}/stage_a_fixed/run_${STAMP}}"
 # storing the payload for vegeta
 TARGETS_FILE="${STAGE_A_DIR}/targets.txt"
 
-# when this exits, we want to stop the server and any stress processes
-trap 'stop_cpu_stress; stop_simple_server' EXIT
+trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$STAGE_A_DIR"
-printf '%s http://%s:%s/\n' "$TARGET_METHOD" "$SERVER_HOST" "$SERVER_PORT" > "$TARGETS_FILE"
-
-# Start test server with exponential delay; log output.
-start_simple_server "${STAGE_A_DIR}/server_exp_${BASELINE_MEAN_DELAY}.log" exp "$BASELINE_MEAN_DELAY"
+write_targets_file "$TARGETS_FILE"
+set_client_network_delay 5ms
 
 # using healthy resources, create the reference CSV
 run_attack_to_dir \
@@ -65,7 +61,10 @@ cat > "${STAGE_A_DIR}/run_config.env" <<EOF
 stage=stage_a_fixed
 rate=${RATE}
 duration=${DURATION}
-baseline_mean_delay=${BASELINE_MEAN_DELAY}
+server_host=${SERVER_HOST}
+server_port=${SERVER_PORT}
+target_url=$(sut_target_url)
+normal_network_delay=5ms
 num_healthy_runs=${NUM_HEALTHY_RUNS}
 reference_csv=${REFERENCE_CSV}
 output_dir=${STAGE_A_DIR}

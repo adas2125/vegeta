@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 DURATION="${DURATION:-15s}"
-BASELINE_MEAN_DELAY="${BASELINE_MEAN_DELAY:-${FIXED_DELAY:-10ms}}"
 NUM_MILD_RUNS="${NUM_MILD_RUNS:-3}"
 
 STAGE_A_ROOT="${STAGE_A_ROOT:-${OUTPUT_ROOT}/stage_a_fixed}"
@@ -14,17 +13,17 @@ COUNTS_JSON="${COUNTS_JSON:-${STAGE_A_DIR}/stage_a_counts.json}"
 MILD_DIR="${MILD_DIR:-${STAGE_A_DIR}/mild_calibration}"
 TARGETS_FILE="${STAGE_A_DIR}/targets.txt"
 
-trap 'stop_cpu_stress; stop_simple_server' EXIT
+trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$MILD_DIR"
+write_targets_file "$TARGETS_FILE"
+set_client_network_delay 5ms
 
 RATE="$(json_value "$COUNTS_JSON" "rate")"
 WORKERS_MILD="$(json_value "$COUNTS_JSON" "severity.workers.mild")"
 CONNECTIONS_MILD="$(json_value "$COUNTS_JSON" "severity.connections.mild")"
 CPU_MILD="$(json_value "$COUNTS_JSON" "severity.cpu.mild")"
 REFERENCE_CSV="$(ls "${STAGE_A_DIR}"/reference/window_results_rps*.csv | sort | head -n 1)"
-
-start_simple_server "${MILD_DIR}/server_exp_${BASELINE_MEAN_DELAY}.log" exp "$BASELINE_MEAN_DELAY"
 
 mkdir -p "${MILD_DIR}/cpu_mild"
 for run_idx in $(seq 1 "$NUM_MILD_RUNS"); do
@@ -77,7 +76,10 @@ cat > "${MILD_DIR}/run_config.env" <<EOF
 stage=stage_a_fixed_mild_calibration
 rate=${RATE}
 duration=${DURATION}
-baseline_mean_delay=${BASELINE_MEAN_DELAY}
+server_host=${SERVER_HOST}
+server_port=${SERVER_PORT}
+target_url=$(sut_target_url)
+normal_network_delay=5ms
 num_mild_runs=${NUM_MILD_RUNS}
 workers_mild=${WORKERS_MILD}
 connections_mild=${CONNECTIONS_MILD}
