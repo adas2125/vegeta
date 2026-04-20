@@ -9,19 +9,17 @@ source "${SCRIPT_DIR}/common.sh"
 DURATION="${DURATION:-10s}"
 RATE="${RATE:-${BASELINE_RPS:-4000}}"
 NUM_HEALTHY_RUNS="${NUM_HEALTHY_RUNS:-2}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
 
 # creating output directory for this experiment
 STAMP="$(date +%Y%m%d_%H%M%S)"
 STAGE_A_DIR="${STAGE_A_DIR:-${OUTPUT_ROOT}/stage_a_fixed/run_${STAMP}}"
 
-# storing the payload for vegeta
-TARGETS_FILE="${STAGE_A_DIR}/targets.txt"
-
 trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$STAGE_A_DIR"
-write_targets_file "$TARGETS_FILE"
-set_client_network_delay 5ms
+require_targets_file "$TARGETS_FILE"
+set_client_network_delay "$NORMAL_NETWORK_DELAY"
 
 # using healthy resources, create the reference CSV
 run_attack_to_dir \
@@ -61,10 +59,9 @@ cat > "${STAGE_A_DIR}/run_config.env" <<EOF
 stage=stage_a_fixed
 rate=${RATE}
 duration=${DURATION}
-server_host=${SERVER_HOST}
-server_port=${SERVER_PORT}
-target_url=$(sut_target_url)
-normal_network_delay=5ms
+target_host=$(target_host)
+targets_file=${TARGETS_FILE}
+normal_network_delay=${NORMAL_NETWORK_DELAY}
 num_healthy_runs=${NUM_HEALTHY_RUNS}
 reference_csv=${REFERENCE_CSV}
 output_dir=${STAGE_A_DIR}
