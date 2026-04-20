@@ -7,16 +7,16 @@ source "${SCRIPT_DIR}/common.sh"
 DURATION="${DURATION:-15s}"
 RATE="${RATE:-${TARGET_RPS:-${EVAL_RATE:-${BASELINE_RPS:-3000}}}}"
 NUM_BASELINE_RUNS="${NUM_BASELINE_RUNS:-2}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 STAGE_B_DIR="${STAGE_B_DIR:-${OUTPUT_ROOT}/stage_b_variable/run_${STAMP}}"
-TARGETS_FILE="${STAGE_B_DIR}/targets.txt"
 
 trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$STAGE_B_DIR"
-write_targets_file "$TARGETS_FILE"
-set_client_network_delay 5ms
+require_targets_file "$TARGETS_FILE"
+set_client_network_delay "$NORMAL_NETWORK_DELAY"
 
 mkdir -p "${STAGE_B_DIR}/baseline_healthy"
 for run_idx in $(seq 1 "$NUM_BASELINE_RUNS"); do
@@ -37,10 +37,9 @@ cat > "${STAGE_B_DIR}/run_config.env" <<EOF
 stage=stage_b_variable_baseline
 rate=${RATE}
 duration=${DURATION}
-server_host=${SERVER_HOST}
-server_port=${SERVER_PORT}
-target_url=$(sut_target_url)
-normal_network_delay=5ms
+target_host=$(target_host)
+targets_file=${TARGETS_FILE}
+normal_network_delay=${NORMAL_NETWORK_DELAY}
 num_baseline_runs=${NUM_BASELINE_RUNS}
 output_dir=${STAGE_B_DIR}
 EOF
