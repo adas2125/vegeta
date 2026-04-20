@@ -5,13 +5,9 @@ Collection scripts live in `experiments_eval`, analysis scripts live in `scripts
 ## Requirements
 
 - Build or keep a Vegeta binary at `./vegeta`, or set `VEGETA_BIN`.
-- Build the synthetic server binary used by the scripts:
-
-```bash
-mkdir -p experiments_eval/output/tools
-go build -o experiments_eval/output/tools/simple_server ./cmd/simple_server
-```
-
+- Start the SUT server on a separate VM before running the scripts.
+- Set `SERVER_HOST` and `SERVER_PORT` for every collection run. The scripts do not start or stop a local server.
+- Install `tc` on the load-generator VM and run with sudo access for client-side netem.
 - Python needs `pandas`, `numpy`, `scipy`, and `matplotlib`.
 
 Defaults:
@@ -21,17 +17,26 @@ Defaults:
 - window size: `1s`
 - Vegeta logical CPUs: `VEGETA_LOGICAL_CPUS=4`
 - metrics: `scheduler_delay`, `connection_delay`, `rho`
-- Stage A server: exponential delay with `BASELINE_MEAN_DELAY=10ms`
+- SUT endpoint: `http://${SERVER_HOST}:${SERVER_PORT}/`
+- normal client-side network delay: `5ms`
+- degraded client-side network delay: `10ms`
+- faster client-side network delay: netem removed
 - CPU contention: background `yes` processes; defaults are mild/mod/severe = `25/50/75` jobs
 - Worker and connection bottlenecks: mild/mod/severe use `0.80/0.65/0.50` of baseline concurrency, estimated as configured baseline RPS times measured mean latency from trimmed baseline windows
 
 The shell scripts now print concise progress only. Per-run details are kept in each output directory.
+
+The collection scripts set client-side netem automatically on the load-generator VM. They infer the interface from the route to `SERVER_HOST`; set `NETEM_IFACE=<iface>` only if that inference is wrong. Netem is removed automatically on script exit.
 
 ## Full Pipeline
 
 Run everything in order:
 
 ```bash
+SERVER_HOST=<sut-vm-ip> \
+SERVER_PORT=<sut-port> \
+BASELINE_RPS=3000 \
+TARGET_RPS=3000 \
 experiments_eval/run_full_pipeline.sh
 ```
 
@@ -55,6 +60,8 @@ experiments_eval/output/stage_b_variable/run_<timestamp>/
 Useful quick-run override:
 
 ```bash
+SERVER_HOST=<sut-vm-ip> \
+SERVER_PORT=<sut-port> \
 DURATION=15s \
 NUM_HEALTHY_RUNS=3 \
 NUM_BASELINE_RUNS=3 \
@@ -70,9 +77,10 @@ experiments_eval/run_full_pipeline.sh
 
 ## Manual Steps
 
-Collect Stage A healthy exponential-delay runs:
+Collect Stage A healthy external-SUT runs:
 
 ```bash
+SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> \
 experiments_eval/run_stage_a_healthy.sh
 ```
 
@@ -90,9 +98,10 @@ python3 scripts_eval/stage_a_thresholds.py \
   --stage-a-dir experiments_eval/output/stage_a_fixed/run_<timestamp>
 ```
 
-Collect Stage B healthy variable-delay baseline runs:
+Collect Stage B healthy external-SUT baseline runs:
 
 ```bash
+SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> \
 TARGET_RPS=5000 experiments_eval/run_stage_b_baseline.sh
 ```
 
@@ -106,6 +115,8 @@ python3 scripts_eval/stage_b_reference.py \
 Collect Stage B condition runs:
 
 ```bash
+SERVER_HOST=<sut-vm-ip> \
+SERVER_PORT=<sut-port> \
 STAGE_A_DIR=experiments_eval/output/stage_a_fixed/run_<timestamp> \
 STAGE_B_DIR=experiments_eval/output/stage_b_variable/run_<timestamp> \
   experiments_eval/run_stage_b_conditions.sh
@@ -141,8 +152,8 @@ Stage B fault-setting analysis creates `stage_b_reference.json` with the target 
 Stage B conditions create:
 
 - `NORMAL`
-- `SUT_DEGRADED` with exponential mean `20ms`
-- `SUT_FASTER` with exponential mean `5ms`
+- `SUT_DEGRADED` with client-side network delay `10ms`
+- `SUT_FASTER` with client-side network delay removed
 - `CPU_CONTENTION/mild`, `CPU_CONTENTION/mod`, `CPU_CONTENTION/severe`
 - `FEW_WORKERS/mild`, `FEW_WORKERS/mod`, `FEW_WORKERS/severe`
 - `FEW_CONNECTIONS/mild`, `FEW_CONNECTIONS/mod`, `FEW_CONNECTIONS/severe`
@@ -178,13 +189,16 @@ Run-level prediction replays retained windows through the online diagnosis state
 
 Useful overrides:
 
+Assume `SERVER_HOST` and `SERVER_PORT` are set in the environment for these examples.
+
 ```bash
 VEGETA_LOGICAL_CPUS=1 experiments_eval/run_full_pipeline.sh
 VEGETA_BIN=./vegeta_local experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3500 experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3000 TARGET_RPS=5000 experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3500 experiments_eval/run_stage_a_healthy.sh
-SERVER_PORT=18180 experiments_eval/run_stage_b_baseline.sh
+SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> experiments_eval/run_stage_b_baseline.sh
+NETEM_IFACE=ens33 experiments_eval/run_full_pipeline.sh
 STAGE_B_SEVERITIES="mod severe" NUM_EVAL_RUNS=1 experiments_eval/run_stage_b_conditions.sh
 TARGET_RPS=500 experiments_eval/run_stage_b_conditions.sh
 SLEEP_BETWEEN_RUNS=10 experiments_eval/run_stage_b_conditions.sh

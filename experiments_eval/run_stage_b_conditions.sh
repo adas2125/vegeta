@@ -8,9 +8,6 @@ source "${SCRIPT_DIR}/common.sh"
 DURATION="${DURATION:-15s}"
 NUM_EVAL_RUNS="${NUM_EVAL_RUNS:-1}"
 STAGE_B_SEVERITIES="${STAGE_B_SEVERITIES:-mild mod severe}"
-BASELINE_MEAN_DELAY="${BASELINE_MEAN_DELAY:-10ms}"
-DEGRADED_MEAN_DELAY="${DEGRADED_MEAN_DELAY:-20ms}"
-FASTER_MEAN_DELAY="${FASTER_MEAN_DELAY:-5ms}"
 
 # getting the latest stage A and stage B runs
 STAGE_A_ROOT="${STAGE_A_ROOT:-${OUTPUT_ROOT}/stage_a_fixed}"
@@ -21,9 +18,10 @@ STAGE_B_SETTINGS_JSON="${STAGE_B_SETTINGS_JSON:-${REFERENCE_JSON:-${STAGE_B_DIR}
 CONDITIONS_DIR="${CONDITIONS_DIR:-${STAGE_B_DIR}/conditions}"
 TARGETS_FILE="${STAGE_B_DIR}/targets.txt"
 
-trap 'stop_cpu_stress; stop_simple_server' EXIT
+trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$CONDITIONS_DIR"
+write_targets_file "$TARGETS_FILE"
 
 # obtaining the rate from the settings json
 RATE="$(json_value "$STAGE_B_SETTINGS_JSON" "rate")"
@@ -67,10 +65,8 @@ run_case() {
   done
 }
 
-# start up the server
-start_simple_server "${CONDITIONS_DIR}/server_exp_${BASELINE_MEAN_DELAY}.log" exp "$BASELINE_MEAN_DELAY"
-
-# run the normal condition first
+# run the normal and resource-fault conditions first
+set_client_network_delay 5ms
 run_case \
   "${CONDITIONS_DIR}/NORMAL" \
   "stage_b_NORMAL" \
@@ -115,11 +111,8 @@ for severity in $STAGE_B_SEVERITIES; do
     "$connections"
 done
 
-# stop the server before running degraded and faster conditions
-stop_simple_server
-
-# start up the server with degraded mean delay but healthy workers and connections
-start_simple_server "${CONDITIONS_DIR}/server_exp_${DEGRADED_MEAN_DELAY}.log" exp "$DEGRADED_MEAN_DELAY"
+# run degraded with higher client-side network latency
+set_client_network_delay 10ms
 run_case \
   "${CONDITIONS_DIR}/SUT_DEGRADED" \
   "stage_b_SUT_DEGRADED" \
@@ -128,10 +121,8 @@ run_case \
   "$HEALTHY_CONNECTIONS" \
   "$HEALTHY_MAX_CONNECTIONS"
 
-stop_simple_server
-
-# start up the server with faster mean delay but healthy workers and connections
-start_simple_server "${CONDITIONS_DIR}/server_exp_${FASTER_MEAN_DELAY}.log" exp "$FASTER_MEAN_DELAY"
+# run faster with client-side network latency removed
+clear_client_network_delay
 run_case \
   "${CONDITIONS_DIR}/SUT_FASTER" \
   "stage_b_SUT_FASTER" \
@@ -148,9 +139,12 @@ eval_rate=${EVAL_RATE}
 duration=${DURATION}
 num_eval_runs=${NUM_EVAL_RUNS}
 stage_b_severities=${STAGE_B_SEVERITIES}
-baseline_mean_delay=${BASELINE_MEAN_DELAY}
-degraded_mean_delay=${DEGRADED_MEAN_DELAY}
-faster_mean_delay=${FASTER_MEAN_DELAY}
+server_host=${SERVER_HOST}
+server_port=${SERVER_PORT}
+target_url=$(sut_target_url)
+normal_network_delay=5ms
+degraded_network_delay=10ms
+faster_network_delay=0ms
 stage_a_dir=${STAGE_A_DIR}
 stage_a_reference_csv=${STAGE_A_REFERENCE_CSV}
 stage_b_settings_json=${STAGE_B_SETTINGS_JSON}
