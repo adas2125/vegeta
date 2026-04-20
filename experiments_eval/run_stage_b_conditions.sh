@@ -8,6 +8,9 @@ source "${SCRIPT_DIR}/common.sh"
 DURATION="${DURATION:-15s}"
 NUM_EVAL_RUNS="${NUM_EVAL_RUNS:-1}"
 STAGE_B_SEVERITIES="${STAGE_B_SEVERITIES:-mild mod severe}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
+DEGRADED_NETWORK_DELAY="${DEGRADED_NETWORK_DELAY:-150ms}"
+FASTER_NETWORK_DELAY="${FASTER_NETWORK_DELAY:-0ms}"
 
 # getting the latest stage A and stage B runs
 STAGE_A_ROOT="${STAGE_A_ROOT:-${OUTPUT_ROOT}/stage_a_fixed}"
@@ -16,12 +19,11 @@ STAGE_B_ROOT="${STAGE_B_ROOT:-${OUTPUT_ROOT}/stage_b_variable}"
 STAGE_B_DIR="${STAGE_B_DIR:-$(ls -d "$STAGE_B_ROOT"/run_* | sort | tail -n 1)}"
 STAGE_B_SETTINGS_JSON="${STAGE_B_SETTINGS_JSON:-${REFERENCE_JSON:-${STAGE_B_DIR}/stage_b_reference.json}}"
 CONDITIONS_DIR="${CONDITIONS_DIR:-${STAGE_B_DIR}/conditions}"
-TARGETS_FILE="${STAGE_B_DIR}/targets.txt"
 
 trap 'stop_cpu_stress; clear_client_network_delay' EXIT
 
 mkdir -p "$CONDITIONS_DIR"
-write_targets_file "$TARGETS_FILE"
+require_targets_file "$TARGETS_FILE"
 
 # obtaining the rate from the settings json
 RATE="$(json_value "$STAGE_B_SETTINGS_JSON" "rate")"
@@ -66,7 +68,7 @@ run_case() {
 }
 
 # run the normal and resource-fault conditions first
-set_client_network_delay 5ms
+set_client_network_delay "$NORMAL_NETWORK_DELAY"
 run_case \
   "${CONDITIONS_DIR}/NORMAL" \
   "stage_b_NORMAL" \
@@ -112,7 +114,7 @@ for severity in $STAGE_B_SEVERITIES; do
 done
 
 # run degraded with higher client-side network latency
-set_client_network_delay 10ms
+set_client_network_delay "$DEGRADED_NETWORK_DELAY"
 run_case \
   "${CONDITIONS_DIR}/SUT_DEGRADED" \
   "stage_b_SUT_DEGRADED" \
@@ -122,7 +124,7 @@ run_case \
   "$HEALTHY_MAX_CONNECTIONS"
 
 # run faster with client-side network latency removed
-clear_client_network_delay
+set_client_network_delay "$FASTER_NETWORK_DELAY"
 run_case \
   "${CONDITIONS_DIR}/SUT_FASTER" \
   "stage_b_SUT_FASTER" \
@@ -139,12 +141,11 @@ eval_rate=${EVAL_RATE}
 duration=${DURATION}
 num_eval_runs=${NUM_EVAL_RUNS}
 stage_b_severities=${STAGE_B_SEVERITIES}
-server_host=${SERVER_HOST}
-server_port=${SERVER_PORT}
-target_url=$(sut_target_url)
-normal_network_delay=5ms
-degraded_network_delay=10ms
-faster_network_delay=0ms
+target_host=$(target_host)
+targets_file=${TARGETS_FILE}
+normal_network_delay=${NORMAL_NETWORK_DELAY}
+degraded_network_delay=${DEGRADED_NETWORK_DELAY}
+faster_network_delay=${FASTER_NETWORK_DELAY}
 stage_a_dir=${STAGE_A_DIR}
 stage_a_reference_csv=${STAGE_A_REFERENCE_CSV}
 stage_b_settings_json=${STAGE_B_SETTINGS_JSON}
