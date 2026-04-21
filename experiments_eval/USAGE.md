@@ -145,7 +145,7 @@ Stage A threshold analysis creates:
 - EMD normalizers
 - `T_conn`, `T_cpu`, `T_worker` from the healthy-window score percentile (`--threshold-quantile`, default `0.90`)
 
-The EMD reference, normalizers, thresholds, and Stage B replay prefer Vegeta's `XLG-WINDOW` anomaly payloads from `xlg_windows_rps*.log`. The older `window_samples_rps*.csv` path is still used as a fallback when no retained payload values are available.
+The EMD reference, normalizers, thresholds, and Stage B replay use Vegeta's `XLG-WINDOW` anomaly payloads from `xlg_windows_rps*.log`. Window summary CSVs are still used for count/reference setup fields such as latency and observed R.
 
 Stage B fault-setting analysis creates `stage_b_reference.json` with the target rate and mild/mod/severe settings used for Stage B fault injection.
 
