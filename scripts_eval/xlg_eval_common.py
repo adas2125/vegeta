@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +18,9 @@ METRIC_SOURCES = {
     "connection_delay": "conn_delay",
 }
 XLG_WINDOW_PREFIX = "XLG-WINDOW:"
-XLG_PAYLOAD_METRICS = {
-    "scheduler_delay": "SchedulerDelays",
-    "conn_delay": "ConnectionDelays",
+XLG_PAYLOAD_COLUMNS = {
+    "scheduler_delay": "scheduler_delays",
+    "conn_delay": "connection_delays",
 }
 LABEL_ORDER = [
     "FEW_CONNECTIONS",
@@ -32,9 +31,9 @@ LABEL_ORDER = [
     "NORMAL",
 ]
 TERMINAL_LABELS = {"FEW_CONNECTIONS", "FEW_WORKERS", "CPU_CONTENTION"}
-SEVERITY_FACTORS = {"mild": 0.80, "mod": 0.65, "severe": 0.50}
-CONNECTION_SEVERITY_FACTORS = {"mild": 0.90, "mod": 0.85, "severe": 0.80}
-CPU_STRESS_JOBS = {"mild": 25, "mod": 50, "severe": 75}
+CPU_STRESS_JOBS = {"mild": 50, "mod": 100, "severe": 150}
+TERMINAL_CONFIRMATION_WINDOWS = 3
+WORKER_CAP_NEAR_RATIO = 0.95
 
 
 def json_default(value: Any) -> Any:
@@ -76,30 +75,21 @@ def run_dirs(root: Path) -> list[Path]:
     return sorted(path for path in root.glob("run_*") if path.is_dir())
 
 
-def read_rate(stage_dir: Path, fallback_runs_subdir: str) -> int:
-    """Read an experiment RPS from run_config.env or output filenames."""
+def read_rate(stage_dir: Path) -> int:
+    """Read an experiment RPS from run_config.env."""
     config = stage_dir / "run_config.env"
-    if config.exists():
-        for line in config.read_text().splitlines():
-            key, _, value = line.partition("=")
-            if key == "rate":
-                return int(value)
-
-    matches = sorted((stage_dir / fallback_runs_subdir).glob("run_*/window_results_rps*.csv"))
-    if not matches:
-        raise FileNotFoundError(f"could not infer rate under {stage_dir / fallback_runs_subdir}")
-
-    match = re.search(r"rps(\d+)", matches[-1].name)
-    if not match:
-        raise ValueError(f"could not infer rate from {matches[-1]}")
-    return int(match.group(1))
+    for line in config.read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key == "rate":
+            return int(value)
+    raise ValueError(f"missing rate in {config}")
 
 
 def read_windows(path: Path) -> pd.DataFrame:
     """Load window summaries with parsed timestamps."""
     df = pd.read_csv(path)
-    df["window_start"] = pd.to_datetime(df["window_start"], errors="coerce", utc=True)
-    df["window_end"] = pd.to_datetime(df["window_end"], errors="coerce", utc=True)
+    df["window_start"] = pd.to_datetime(df["window_start"], utc=True)
+    df["window_end"] = pd.to_datetime(df["window_end"], utc=True)
     numeric_cols = [
         "window_duration_ms",
         "total_latency_count",
@@ -109,19 +99,8 @@ def read_windows(path: Path) -> pd.DataFrame:
         "avg_in_flight",
         "observed_R",
     ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna(subset=["window_start", "window_end"])
-
-
-def read_samples(path: Path) -> pd.DataFrame:
-    """Load per-window distribution samples."""
-    df = pd.read_csv(path)
-    df["window_start"] = pd.to_datetime(df["window_start"], errors="coerce", utc=True)
-    df["window_end"] = pd.to_datetime(df["window_end"], errors="coerce", utc=True)
-    df["value_ms"] = pd.to_numeric(df["value_ms"], errors="coerce")
-    return df.dropna(subset=["window_start", "window_end", "metric_name", "value_ms"])
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+    return df
 
 
 def read_xlg_payloads(path: Path) -> pd.DataFrame:
@@ -129,86 +108,69 @@ def read_xlg_payloads(path: Path) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for line in path.open():
         if not line.startswith(XLG_WINDOW_PREFIX):
-            continue
-        raw_payload = line[len(XLG_WINDOW_PREFIX) :].strip()
-        if not raw_payload:
-            continue
-        try:
-            payload = json.loads(raw_payload)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
+            raise ValueError(f"unexpected line in {path}: {line[:80].rstrip()}")
 
-        try:
-            rho = float(payload.get("rho", float("nan")))
-        except (TypeError, ValueError):
-            rho = float("nan")
+        payload = json.loads(line[len(XLG_WINDOW_PREFIX) :])
+        rho = float(payload["rho"])
         if rho == -1:
             rho = float("nan")
 
         rows.append(
             {
                 "window_start": pd.to_datetime(
-                    payload.get("window_start"),
+                    payload["window_start"],
                     unit="ms",
-                    errors="coerce",
                     utc=True,
                 ),
                 "rho": rho,
-                "scheduler_delays": finite_values(payload.get("SchedulerDelays") or []),
-                "connection_delays": finite_values(payload.get("ConnectionDelays") or []),
+                "avg_in_flight": finite_number(payload.get("AvgInFlight")),
+                "max_workers": finite_number(payload.get("MaxWorkers")),
+                "scheduler_delays": finite_values(payload["SchedulerDelays"] or []),
+                "connection_delays": finite_values(payload["ConnectionDelays"] or []),
             }
         )
 
     if not rows:
         return pd.DataFrame(
-            columns=["window_start", "rho", "scheduler_delays", "connection_delays"]
+            columns=[
+                "window_start",
+                "rho",
+                "avg_in_flight",
+                "max_workers",
+                "scheduler_delays",
+                "connection_delays",
+            ]
         )
-    return pd.DataFrame(rows).dropna(subset=["window_start"])
+    return pd.DataFrame(rows)
 
 
-def trim_windows(df: pd.DataFrame, trim_s: float = 5.0, drop_last: bool = True) -> pd.DataFrame:
+def trim_windows(df: pd.DataFrame, trim_s: float = 5.0) -> pd.DataFrame:
     """Drop startup windows and the final artifact-prone window."""
     if df.empty:
         return df.copy()
     ordered = df.sort_values(["window_start", "window_end"]).reset_index(drop=True)
     cutoff = ordered["window_start"].min() + pd.to_timedelta(trim_s, unit="s")
     trimmed = ordered[ordered["window_start"] >= cutoff].copy()
-    if drop_last and len(trimmed) > 0:
+    if len(trimmed) > 0:
         trimmed = trimmed.iloc[:-1].copy()
     return trimmed.reset_index(drop=True)
 
 
-def trim_payloads(df: pd.DataFrame, trim_s: float = 5.0, drop_last: bool = True) -> pd.DataFrame:
+def trim_payloads(df: pd.DataFrame, trim_s: float = 5.0) -> pd.DataFrame:
     """Drop startup payloads and the final artifact-prone payload."""
     if df.empty:
         return df.copy()
     ordered = df.sort_values("window_start").reset_index(drop=True)
     cutoff = ordered["window_start"].min() + pd.to_timedelta(trim_s, unit="s")
     trimmed = ordered[ordered["window_start"] >= cutoff].copy()
-    if drop_last and len(trimmed) > 0:
+    if len(trimmed) > 0:
         trimmed = trimmed.iloc[:-1].copy()
     return trimmed.reset_index(drop=True)
-
-
-def trim_samples_for_windows(samples: pd.DataFrame, windows: pd.DataFrame) -> pd.DataFrame:
-    """Keep sample rows that belong to retained windows."""
-    keys = windows[["window_start", "window_end"]].drop_duplicates()
-    if keys.empty:
-        return samples.iloc[0:0].copy()
-    return keys.merge(samples, on=["window_start", "window_end"], how="left")
 
 
 def retained_windows(run_dir: Path, trim_s: float = 5.0) -> pd.DataFrame:
     """Load retained window rows for one run."""
     return trim_windows(read_windows(newest_match(run_dir, "window_results_rps*.csv")), trim_s=trim_s)
-
-
-def retained_samples(run_dir: Path, windows: pd.DataFrame) -> pd.DataFrame:
-    """Load samples belonging to retained windows."""
-    samples = read_samples(newest_match(run_dir, "window_samples_rps*.csv"))
-    return trim_samples_for_windows(samples, windows)
 
 
 def retained_xlg_payloads(run_dir: Path, trim_s: float = 5.0) -> pd.DataFrame:
@@ -220,13 +182,26 @@ def finite_values(values: Iterable[Any]) -> list[float]:
     """Return finite floats from an iterable."""
     out: list[float] = []
     for value in values:
-        try:
-            current = float(value)
-        except (TypeError, ValueError):
-            continue
+        current = float(value)
         if math.isfinite(current):
             out.append(current)
     return out
+
+
+def finite_number(value: Any) -> float:
+    """Return a finite float, or NaN if the scalar is missing/invalid."""
+    try:
+        current = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return current if math.isfinite(current) else float("nan")
+
+
+def is_worker_cap_near(avg_in_flight: Any, max_workers: Any) -> bool:
+    """Use average in-flight requests as a lightweight proxy for worker pressure."""
+    current = finite_number(avg_in_flight)
+    cap = finite_number(max_workers)
+    return math.isfinite(current) and math.isfinite(cap) and cap > 0 and current >= WORKER_CAP_NEAR_RATIO * cap
 
 
 def quantile(values: Iterable[Any], q: float) -> float:
@@ -245,10 +220,16 @@ def median(values: Iterable[Any]) -> float:
     return float(np.median(vals))
 
 
+def mean(values: Iterable[Any]) -> float:
+    """Compute a mean while ignoring missing values."""
+    vals = finite_values(values)
+    if not vals:
+        return float("nan")
+    return float(np.mean(vals))
+
+
 def round_count(value: float) -> int:
     """Round a capacity count and keep it usable."""
-    if not math.isfinite(float(value)):
-        return 1
     return max(1, int(np.rint(float(value))))
 
 
@@ -263,32 +244,69 @@ def raw_emd(left: Iterable[Any], right: Iterable[Any]) -> float:
 
 def normalized_score(raw: float, normalizer: float) -> float:
     """Normalize a raw EMD score while preserving missing values."""
-    return raw / (normalizer or 1.0) if math.isfinite(raw) else float("nan")
+    return raw / normalizer if math.isfinite(raw) else float("nan")
 
 
-def metric_values(samples: pd.DataFrame, metric: str) -> list[float]:
-    """Extract one sample distribution from a samples dataframe."""
-    return finite_values(samples[samples["metric_name"] == metric]["value_ms"])
+def cheap_signal_quantiles(run_list: list[Path], trim_s: float = 5.0) -> dict[str, dict[str, float]]:
+    """Compute healthy p95 thresholds for cheap delay signals."""
+
+    # obtain values from the healthy runs and pool them together by metric (e.g. scheduler, connection delay)
+    values_by_metric = {
+        metric: pooled_metric_values(run_list, source, trim_s=trim_s)
+        for metric, source in METRIC_SOURCES.items()
+    }
+
+    # obtain the p95 quantiles for each metric and return them in a dictionary
+    quantiles: dict[str, dict[str, float]] = {}
+    for metric, values in values_by_metric.items():
+        if not values:
+            raise ValueError(f"no healthy cheap-signal values for {metric}")
+        quantiles[metric] = {
+            "healthy_p95_ms": quantile(values, 0.95),
+        }
+
+    return quantiles
+
+
+def cheap_signal_trigger(current_ms: float, quantiles: dict[str, float]) -> bool:
+    """Return whether the current cheap signal is above the healthy p95 threshold."""
+    healthy_p95_ms = float(quantiles["healthy_p95_ms"])
+    return math.isfinite(current_ms) and math.isfinite(healthy_p95_ms) and current_ms > healthy_p95_ms
+
+
+def should_compute_emd(
+    rho: float,
+    rho_center: float,
+    epsilon: float,
+    scheduler_quantile_trigger: bool,
+    connection_quantile_trigger: bool,
+    worker_cap_near: bool = False,
+) -> tuple[bool, str]:
+    """Decide whether rho or cheap quantile signals require scheduler EMD."""
+
+    if worker_cap_near:
+        return True, "worker_cap_near"
+
+    # recompute emd if we are outside the healthy band
+    if math.isfinite(rho) and (rho > rho_center + epsilon or rho < rho_center - epsilon):
+        return True, "rho_outside_band"
+
+    # compute emd if one of the triggers is activated
+    if scheduler_quantile_trigger:
+        return True, "scheduler_mean_gt_healthy_p95"
+    if connection_quantile_trigger:
+        return True, "connection_p25_gt_healthy_p95"
+
+    return False, "cheap_signals_within_band"
 
 
 def run_metric_values(run_dir: Path, metric: str, trim_s: float = 5.0) -> list[float]:
     """Load one metric distribution from one run."""
-    payload_key = XLG_PAYLOAD_METRICS.get(metric)
-    if payload_key is not None:
-        try:
-            values: list[float] = []
-            payloads = retained_xlg_payloads(run_dir, trim_s=trim_s)
-            column = "scheduler_delays" if payload_key == "SchedulerDelays" else "connection_delays"
-            for current in payloads[column]:
-                values.extend(finite_values(current))
-            if values:
-                return values
-        except FileNotFoundError:
-            pass
-
-    windows = retained_windows(run_dir, trim_s=trim_s)
-    samples = retained_samples(run_dir, windows)
-    return metric_values(samples, metric)
+    values: list[float] = []
+    payloads = retained_xlg_payloads(run_dir, trim_s=trim_s)
+    for current in payloads[XLG_PAYLOAD_COLUMNS[metric]]:
+        values.extend(current)
+    return values
 
 
 def pooled_metric_values(run_list: list[Path], metric: str, trim_s: float = 5.0) -> list[float]:
@@ -312,42 +330,18 @@ def leave_one_out_normalizers(
     trim_s: float = 5.0,
 ) -> dict[str, float]:
     """Compute q95 healthy EMD normalizers from leave-one-out runs."""
-    raw_by_metric: dict[str, list[float]] = {metric: [] for metric in METRIC_SOURCES}
+    raw_by_metric: dict[str, list[float]] = {"scheduler_delay": []}
     for run_dir in run_list:
-        # print(f"computing normalizers with leave-out run {run_dir}")
         others = [path for path in run_list if path != run_dir]
-        # print(f"The other runs are {others}")
-        for metric, source in METRIC_SOURCES.items():
-            # print(f"computing normalizer for metric {metric} with source {source}")
-            current = run_metric_values(run_dir, source, trim_s=trim_s)
-            reference = pooled_metric_values(others, source, trim_s=trim_s)
-            # print(f"Total values for current: {len(current)}, Total values for reference: {len(reference)}")
-            raw_by_metric[metric].append(raw_emd(current, reference))
+        current = run_metric_values(run_dir, "scheduler_delay", trim_s=trim_s)
+        reference = pooled_metric_values(others, "scheduler_delay", trim_s=trim_s)
+        raw_by_metric["scheduler_delay"].append(raw_emd(current, reference))
     
     normalizers: dict[str, float] = {}
     for metric, values in raw_by_metric.items():
-        # print(f"raw EMD values for metric {metric}: {values}")
         q95 = quantile(values, 0.95)
-        # print(f"95th percentile for metric {metric}: {q95}")
         normalizers[metric] = q95 if math.isfinite(q95) and q95 > 0 else 1.0
     return normalizers
-
-
-def baseline_concurrency(run_list: list[Path], configured_rate: int, trim_s: float = 5.0) -> float:
-    """Estimate mean concurrency as configured rate times measured latency."""
-    values: list[float] = []
-
-    for run_dir in run_list:
-        windows = retained_windows(run_dir, trim_s=trim_s)
-        if "avg_total_latency_ms" not in windows.columns:
-            continue
-        for _, window in windows.iterrows():
-            current_latency_ms = float(window["avg_total_latency_ms"])
-            if not math.isfinite(current_latency_ms):
-                continue
-            values.append(configured_rate * current_latency_ms / 1000.0)
-
-    return float(np.mean(values)) if values else float("nan")
 
 
 def rho_values(run_list: list[Path], trim_s: float = 5.0) -> list[float]:
@@ -355,29 +349,8 @@ def rho_values(run_list: list[Path], trim_s: float = 5.0) -> list[float]:
     values: list[float] = []
     for run_dir in run_list:
         windows = retained_windows(run_dir, trim_s=trim_s)
-        if "observed_R" in windows.columns:
-            values.extend(finite_values(windows["observed_R"]))
+        values.extend(finite_values(windows["observed_R"]))
     return values
-
-
-def capacity_levels(
-    baseline_count: float,
-    factors: dict[str, float] = SEVERITY_FACTORS,
-) -> dict[str, int]:
-    """Build mild/mod/severe caps from one healthy baseline count."""
-    return {
-        severity: round_count(factor * baseline_count)
-        for severity, factor in factors.items()
-    }
-
-
-def severity_from_count(baseline_count: float) -> dict[str, dict[str, int]]:
-    """Build fault-injection settings from one healthy baseline count."""
-    return {
-        "workers": capacity_levels(baseline_count),
-        "connections": capacity_levels(baseline_count, CONNECTION_SEVERITY_FACTORS),
-        "cpu": CPU_STRESS_JOBS.copy(),
-    }
 
 
 @dataclass
@@ -387,6 +360,8 @@ class DiagnosisState:
     # initializes in the normal regime with no previous rho and not terminal
     label: str = "NORMAL"
     previous_rho: float = float("nan")
+    pending_terminal_label: str = ""
+    pending_terminal_count: int = 0
     terminal: bool = False
 
 
@@ -395,14 +370,51 @@ def score_elevated(score: float, threshold: float) -> bool:
     return math.isfinite(score) and score > threshold
 
 
+def reset_terminal_confirmation(state: DiagnosisState) -> None:
+    """Clear pending terminal evidence after a non-terminal window."""
+    state.pending_terminal_label = ""
+    state.pending_terminal_count = 0
+
+
+def confirm_terminal_candidate(
+    state: DiagnosisState,
+    candidate_label: str,
+    candidate_reason: str,
+    fallback_label: str,
+    reference_rho: float,
+) -> tuple[str, bool, str, float]:
+    """Latch a terminal label only after consecutive matching candidates."""
+    if state.pending_terminal_label == candidate_label:
+        # increase the terminal count
+        state.pending_terminal_count += 1
+    else:
+        # reset the pending terminal label and count to start confirming the new candidate
+        state.pending_terminal_label = candidate_label
+        state.pending_terminal_count = 1
+
+    # mark terminal once we have seen consecutive windows
+    if state.pending_terminal_count >= TERMINAL_CONFIRMATION_WINDOWS:
+        state.label = candidate_label
+        state.terminal = True
+        return state.label, True, candidate_reason, reference_rho
+
+    # use a non-terminal fallback label until we have confirmed the candidate
+    state.label = fallback_label
+    reason = f"{candidate_reason}_pending_{state.pending_terminal_count}_of_{TERMINAL_CONFIRMATION_WINDOWS}"
+    return state.label, False, reason, reference_rho
+
+
 def transition_window(
     state: DiagnosisState,
     rho: float,
     scheduler_score: float,
-    connection_score: float,
+    scheduler_quantile_trigger: bool,
+    connection_quantile_trigger: bool,
+    emd_reason: str,
     thresholds: dict[str, float],
     rho_center: float,
     epsilon: float,
+    worker_cap_near: bool = False,
 ) -> tuple[str, bool, str, float]:
     """Advance the online diagnosis state using only the current window.
 
@@ -430,8 +442,7 @@ def transition_window(
     worker_threshold = thresholds["T_worker"]
     cpu_threshold = thresholds["T_cpu"] # for now, worker and cpu share the same threshold
 
-    # determine whether the current window's scheduler and connection scores are elevated compared to the thresholds
-    conn_elevated = score_elevated(connection_score, thresholds["T_conn"])
+    # determine whether the current window's scheduler score is elevated compared to the thresholds
     worker_sched_elevated = score_elevated(scheduler_score, worker_threshold)
     cpu_sched_elevated = score_elevated(scheduler_score, cpu_threshold)
 
@@ -440,124 +451,155 @@ def transition_window(
     rho_low = rho < rho_center - epsilon
 
     # compare rho to previous values of rho
-    rho_rising = math.isfinite(previous_rho) and rho > previous_rho + epsilon
-    rho_falling = math.isfinite(previous_rho) and rho < previous_rho - epsilon
     state.previous_rho = rho
 
+    # since we are near the worker cap and scheduler is elevated, we check for FEW_WORKERS
+    if worker_cap_near and worker_sched_elevated and scheduler_quantile_trigger:
+        if rho_high:
+            fallback_label = "SUT_DEGRADED"
+        elif rho_low:
+            fallback_label = "SUT_FASTER"
+        else:
+            fallback_label = "NORMAL"
+        return confirm_terminal_candidate(
+            state,
+            "FEW_WORKERS",
+            "worker_cap_scheduler_delay",
+            fallback_label,
+            reference_rho,
+        )
+
     if rho_high:
-        # we compute emd's when the SUT is not degraded or rho is rising
-        check_terminal = state.label != "SUT_DEGRADED" or rho_rising
+        # we check for CPU_CONTENTION or FEW_CONNECTIONS
+        if connection_quantile_trigger:
+            return confirm_terminal_candidate(
+                state,
+                "FEW_CONNECTIONS",
+                "rho_high_connection_delay",
+                "SUT_DEGRADED",
+                reference_rho,
+            )
+        if cpu_sched_elevated and scheduler_quantile_trigger:
+            return confirm_terminal_candidate(
+                state,
+                "CPU_CONTENTION",
+                "rho_high_scheduler_delay",
+                "SUT_DEGRADED",
+                reference_rho,
+            )
 
-        # due to the rising rho, we check for CPU_CONTENTION or FEW_CONNECTIONS, not FEW_WORKERS
-        if check_terminal and cpu_sched_elevated:
-            state.label = "CPU_CONTENTION"
-            state.terminal = True
-            return state.label, True, "rho_high_scheduler_delay", reference_rho
-        if check_terminal and conn_elevated:
-            state.label = "FEW_CONNECTIONS"
-            state.terminal = True
-            return state.label, True, "rho_high_connection_delay", reference_rho
-
-        # no terminal conditions, but SUT is degraded if rho is high
+        # no terminal conditions, but SUT is degraded if rho is high, reset terminal label
+        reset_terminal_confirmation(state)
         state.label = "SUT_DEGRADED"
-        reason = "rho_high" if check_terminal else "hold_sut_degraded"
+        reason = "rho_high"
         return state.label, False, reason, reference_rho
 
     if rho_low:
-        # due to a lower rho, we compute EMD if the rho is falling or if we haven't already labeled SUT_FASTER
-        check_terminal = state.label != "SUT_FASTER" or rho_falling
-        if check_terminal and worker_sched_elevated:
-            state.label = "FEW_WORKERS"
-            state.terminal = True
-            return state.label, True, "rho_low_scheduler_delay", reference_rho
-        
-        # SUT is faster if rho is low but no terminal conditions are met
+        # SUT is faster if rho is low but no terminal conditions are met; worker bottleneck
+        # checked earlier w/ worker cap being nearly saturated
+        reason = "hold_sut_faster" if state.label == "SUT_FASTER" else "rho_low"
+        reset_terminal_confirmation(state)
         state.label = "SUT_FASTER"
-        reason = "rho_low" if check_terminal else "hold_sut_faster"
         return state.label, False, reason, reference_rho
 
     # if rho is within the healthy band, we return NORMAL
-    if state.label not in TERMINAL_LABELS:
-        state.label = "NORMAL"
+    reset_terminal_confirmation(state)
+    state.label = "NORMAL"
     return state.label, False, "rho_within_band", reference_rho
 
 
-WINDOW_SCORE_COLUMNS = ["rho", "scheduler_score", "connection_score"]
-
-
-def xlg_payload_window_scores(
-    run_dir: Path,
-    reference: dict[str, list[float]],
-    normalizers: dict[str, float],
-    trim_s: float = 5.0,
-) -> pd.DataFrame:
-    """Score retained XLG anomaly payloads for one run."""
-    # generates dataframe w/ window_star, rho, scheduler_delays, and connection_delays columns
-    payloads = retained_xlg_payloads(run_dir, trim_s=trim_s)
-
-    rows: list[dict[str, Any]] = []
-    scheduler_normalizer = normalizers.get("scheduler_delay", 1.0) or 1.0
-    connection_normalizer = normalizers.get("connection_delay", 1.0) or 1.0
-
-    for _, row in payloads.reset_index(drop=True).iterrows():
-        sched_raw = raw_emd(row["scheduler_delays"], reference["scheduler_delay"])
-        conn_raw = raw_emd(row["connection_delays"], reference["connection_delay"])
-        rows.append(
-            {
-                "rho": float(row["rho"]),
-                "scheduler_score": normalized_score(sched_raw, scheduler_normalizer),
-                "connection_score": normalized_score(conn_raw, connection_normalizer),
-            }
-        )
-    return pd.DataFrame(rows, columns=WINDOW_SCORE_COLUMNS)
-
-
-def csv_window_scores(
-    run_dir: Path,
-    reference: dict[str, list[float]],
-    normalizers: dict[str, float],
-    trim_s: float = 5.0,
-) -> pd.DataFrame:
-    """Score retained CSV windows for one run."""
-    windows = retained_windows(run_dir, trim_s=trim_s)
-    samples = retained_samples(run_dir, windows)
-    grouped = {
-        key: group
-        for key, group in samples.groupby(["window_start", "window_end"], sort=False)
-    }
-
-    rows: list[dict[str, Any]] = []
-    scheduler_normalizer = normalizers.get("scheduler_delay", 1.0) or 1.0
-    connection_normalizer = normalizers.get("connection_delay", 1.0) or 1.0
-    for _, row in windows.reset_index(drop=True).iterrows():
-        key = (row["window_start"], row["window_end"])
-        sample_df = grouped.get(key, samples.iloc[0:0])
-        sched_raw = raw_emd(metric_values(sample_df, "scheduler_delay"), reference["scheduler_delay"])
-        conn_raw = raw_emd(metric_values(sample_df, "conn_delay"), reference["connection_delay"])
-        rows.append(
-            {
-                "rho": float(row.get("observed_R", float("nan"))),
-                "scheduler_score": normalized_score(sched_raw, scheduler_normalizer),
-                "connection_score": normalized_score(conn_raw, connection_normalizer),
-            }
-        )
-    return pd.DataFrame(rows, columns=WINDOW_SCORE_COLUMNS)
+WINDOW_SCORE_COLUMNS = [
+    "rho",
+    "scheduler_score",
+    "connection_score",
+    "scheduler_mean_ms",
+    "connection_mean_ms",
+    "scheduler_median_ms",
+    "connection_p25_ms",
+    "scheduler_mean_gt_healthy_p95",
+    "connection_p25_gt_healthy_p95",
+    "worker_cap_near",
+    "emd_computed",
+    "emd_reason",
+]
 
 
 def window_scores(
     run_dir: Path,
     reference: dict[str, list[float]],
     normalizers: dict[str, float],
+    cheap_quantiles: dict[str, dict[str, float]] | None = None,
+    rho_center: float = float("nan"),
+    epsilon: float = float("nan"),
     trim_s: float = 5.0,
 ) -> pd.DataFrame:
-    """Score retained windows, preferring Vegeta XLG anomaly payloads."""
-    try:
-        scores = xlg_payload_window_scores(run_dir, reference, normalizers, trim_s=trim_s)
-        if not scores.empty:
-            return scores
-    except FileNotFoundError:
-        print(f"No XLG payloads found for {run_dir}, falling back to CSV scoring.")
-    return csv_window_scores(run_dir, reference, normalizers, trim_s=trim_s)
+    """Score retained XLG anomaly payloads for one run."""
+    payloads = retained_xlg_payloads(run_dir, trim_s=trim_s)
+
+    rows: list[dict[str, Any]] = []
+    scheduler_normalizer = normalizers["scheduler_delay"]
+
+    for _, row in payloads.reset_index(drop=True).iterrows():
+        scheduler_mean, connection_mean = mean(row["scheduler_delays"]), mean(row["connection_delays"])
+        scheduler_median = median(row["scheduler_delays"])
+        connection_p25 = quantile(row["connection_delays"], 0.25)
+        worker_cap_near = is_worker_cap_near(row["avg_in_flight"], row["max_workers"])
+
+        if cheap_quantiles is None:
+            scheduler_quantile_trigger = False
+            connection_quantile_trigger = False
+            emd_computed = True
+            emd_reason = "cheap_quantiles_unavailable"
+        else:
+            # comparing the scheduler_mean with healthy p95 for scheduler delay
+            scheduler_quantile_trigger = cheap_signal_trigger(
+                scheduler_mean,
+                cheap_quantiles["scheduler_delay"],
+            )
+
+            # comparing the connection_p25 with healthy p95 for connection delay
+            connection_quantile_trigger = cheap_signal_trigger(
+                connection_p25,
+                cheap_quantiles["connection_delay"],
+            )
+
+            # we decide whether to compute EMD
+            emd_computed, emd_reason = should_compute_emd(
+                rho=float(row["rho"]),
+                rho_center=rho_center,
+                epsilon=epsilon,
+                scheduler_quantile_trigger=scheduler_quantile_trigger,
+                connection_quantile_trigger=connection_quantile_trigger,
+                worker_cap_near=worker_cap_near,
+            )
+
+        if emd_computed:
+            # compute the scheduler EMD against the pooled healthy reference and normalize it
+            sched_raw = raw_emd(row["scheduler_delays"], reference["scheduler_delay"])
+            scheduler_score = normalized_score(sched_raw, scheduler_normalizer)
+        else:
+            scheduler_score = 0.0
+
+        # Connection EMD is no longer used for diagnosis; keep the column for compatibility.
+        connection_score = float("nan")
+
+        rows.append(
+            {
+                "rho": float(row["rho"]),
+                "scheduler_score": scheduler_score,
+                "connection_score": connection_score,
+                "scheduler_mean_ms": scheduler_mean,
+                "connection_mean_ms": connection_mean,
+                "scheduler_median_ms": scheduler_median,
+                "connection_p25_ms": connection_p25,
+                "scheduler_mean_gt_healthy_p95": scheduler_quantile_trigger,
+                "connection_p25_gt_healthy_p95": connection_quantile_trigger,
+                "worker_cap_near": worker_cap_near,
+                "emd_computed": emd_computed,
+                "emd_reason": emd_reason,
+            }
+        )
+    return pd.DataFrame(rows, columns=WINDOW_SCORE_COLUMNS)
 
 
 def window_predictions(
@@ -567,12 +609,22 @@ def window_predictions(
     thresholds: dict[str, float],
     rho_center: float,
     epsilon: float,
+    cheap_quantiles: dict[str, dict[str, float]] | None = None,
     trim_s: float = 5.0,
 ) -> pd.DataFrame:
     """Replay retained windows through the online diagnosis state machine."""
 
-    # outputs a dataframe for each window consisting of rho, scheduler_score, connection_score
-    scores = window_scores(run_dir, reference, normalizers, trim_s=trim_s)
+    # outputs a dataframe for each window consisting of rho, scheduler_score,
+    # and the cheap connection trigger along with some other metrics
+    scores = window_scores(
+        run_dir=run_dir,
+        reference=reference,
+        normalizers=normalizers,
+        cheap_quantiles=cheap_quantiles,
+        rho_center=rho_center,
+        epsilon=epsilon,
+        trim_s=trim_s,
+    )
 
     labels: list[str] = []
     terminals: list[bool] = []
@@ -587,7 +639,10 @@ def window_predictions(
             state=state,
             rho=float(row["rho"]),
             scheduler_score=float(row["scheduler_score"]),
-            connection_score=float(row["connection_score"]),
+            scheduler_quantile_trigger=bool(row["scheduler_mean_gt_healthy_p95"]),
+            connection_quantile_trigger=bool(row["connection_p25_gt_healthy_p95"]),
+            worker_cap_near=bool(row["worker_cap_near"]),
+            emd_reason=str(row["emd_reason"]),
             thresholds=thresholds,
             rho_center=rho_center,
             epsilon=epsilon,
@@ -632,14 +687,3 @@ def run_prediction_from_windows(df: pd.DataFrame) -> tuple[str, bool]:
         return label, True
     label = str(df.iloc[-1]["window_prediction"])
     return label, label in TERMINAL_LABELS
-
-
-def confusion_matrix(rows: pd.DataFrame) -> pd.DataFrame:
-    """Build an actual-by-predicted confusion matrix."""
-    labels = LABEL_ORDER.copy()
-    extra = sorted(
-        set(rows["actual_label"]).union(rows["predicted_label"]).difference(labels)
-    )
-    labels.extend(extra)
-    matrix = pd.crosstab(rows["actual_label"], rows["predicted_label"])
-    return matrix.reindex(index=labels, columns=labels, fill_value=0)

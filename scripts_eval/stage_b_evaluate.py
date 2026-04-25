@@ -10,7 +10,6 @@ import pandas as pd
 
 from xlg_eval_common import (
     LABEL_ORDER,
-    confusion_matrix,
     mode_label,
     pooled_reference,
     read_json,
@@ -125,6 +124,15 @@ def write_heatmap(path: Path, matrix: pd.DataFrame) -> None:
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
+def confusion_matrix(rows: pd.DataFrame) -> pd.DataFrame:
+    """Build an actual-by-predicted confusion matrix."""
+    labels = LABEL_ORDER.copy()
+    extra = sorted(
+        set(rows["actual_label"]).union(rows["predicted_label"]).difference(labels)
+    )
+    labels.extend(extra)
+    matrix = pd.crosstab(rows["actual_label"], rows["predicted_label"])
+    return matrix.reindex(index=labels, columns=labels, fill_value=0)
 
 def main() -> None:
     args = parse_args()
@@ -149,6 +157,7 @@ def main() -> None:
     normalizers = stage_a_thresholds["normalizers"]
     rho_center = float(stage_a_thresholds["rho_center_fixed"])
     epsilon = float(stage_a_thresholds["epsilon_fixed"])
+    cheap_quantiles = stage_a_thresholds["cheap_signal_quantiles"]
 
     # identifies the healthy runs from stage a
     healthy_runs = run_dirs(stage_a_dir / "healthy")
@@ -167,6 +176,7 @@ def main() -> None:
     run_rows: list[dict[str, object]] = []
     for item in condition_runs:
         run_dir = Path(item["run_dir"])
+        # print(f"[INFO] Evaluating {run_dir} with actual label {item['actual_label']} and severity {item['severity']}")
         # Replay retained windows through the same online state machine used by the live diagnoser.
         windows = window_predictions(
             run_dir=run_dir,
@@ -175,16 +185,13 @@ def main() -> None:
             thresholds=thresholds,
             rho_center=rho_center,
             epsilon=epsilon,
+            cheap_quantiles=cheap_quantiles,
             trim_s=args.trim_s,
         )
         
         predicted, terminal = run_prediction_from_windows(windows)
         if windows.empty:
-            decision_window = 0
-            decision_reason = "no_windows"
-            rho_decision = float("nan")
-            scheduler_score_decision = float("nan")
-            connection_score_decision = float("nan")
+            raise ValueError(f"{run_dir} produced no retained XLG windows; check duration, trim_s, or XLG log")
         else:
             # If any window is terminal, the decision is the first terminal window. Otherwise, it's the last window.
             terminal_windows = windows[windows["terminal"]]
@@ -194,6 +201,17 @@ def main() -> None:
             rho_decision = float(decision["rho"])
             scheduler_score_decision = float(decision["scheduler_score"])
             connection_score_decision = float(decision["connection_score"])
+            scheduler_mean_decision = float(decision["scheduler_mean_ms"])
+            connection_mean_decision = float(decision["connection_mean_ms"])
+            scheduler_median_decision = float(decision["scheduler_median_ms"])
+            connection_p25_decision = float(decision["connection_p25_ms"])
+            scheduler_mean_gt_healthy_p95_decision = bool(decision["scheduler_mean_gt_healthy_p95"])
+            connection_p25_gt_healthy_p95_decision = bool(decision["connection_p25_gt_healthy_p95"])
+            emd_computed_decision = bool(decision["emd_computed"])
+            emd_reason_decision = str(decision["emd_reason"])
+            emd_computed_windows = int(windows["emd_computed"].fillna(False).astype(bool).sum())
+            emd_total_windows = int(len(windows))
+            emd_computed_fraction = emd_computed_windows / emd_total_windows
 
         run_rows.append(
             {
@@ -208,6 +226,17 @@ def main() -> None:
                 "rho_decision": rho_decision,
                 "scheduler_score_decision": scheduler_score_decision,
                 "connection_score_decision": connection_score_decision,
+                "scheduler_mean_decision": scheduler_mean_decision,
+                "connection_mean_decision": connection_mean_decision,
+                "scheduler_median_decision": scheduler_median_decision,
+                "connection_p25_decision": connection_p25_decision,
+                "scheduler_mean_gt_healthy_p95_decision": scheduler_mean_gt_healthy_p95_decision,
+                "connection_p25_gt_healthy_p95_decision": connection_p25_gt_healthy_p95_decision,
+                "emd_computed_decision": emd_computed_decision,
+                "emd_reason_decision": emd_reason_decision,
+                "emd_computed_windows": emd_computed_windows,
+                "emd_total_windows": emd_total_windows,
+                "emd_computed_fraction": emd_computed_fraction,
             }
         )
 

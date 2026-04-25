@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from xlg_eval_common import (
+    cheap_signal_quantiles,
     finite_values,
     leave_one_out_normalizers,
     pooled_reference,
@@ -84,29 +85,31 @@ def main() -> None:
     # normalizers now computed run-level (leave_one_out makes sense if there are more baselines)
     normalizers = leave_one_out_normalizers(healthy_runs, trim_s=args.trim_s)
 
-    # returns for each window, the scheduler and connection scores w/ the normalizers applied, as well as rho values
+    # returns for each window, the scheduler scores w/ the normalizers applied, as well as rho values
     healthy_windows = healthy_window_scores(
         healthy_runs=healthy_runs,
         normalizers=normalizers,
         trim_s=args.trim_s,
     )
 
-    # obtain scheduler and connection thresholds based on the provided quantile of the healthy window scores aggregated across all healthy runs
+    # obtain scheduler thresholds based on the provided quantile of the healthy window scores aggregated across all healthy runs
     scheduler_threshold = score_quantile(healthy_windows["scheduler_score"], args.threshold_quantile)
-    connection_threshold = score_quantile(healthy_windows["connection_score"], args.threshold_quantile)
-
+    cheap_quantiles = cheap_signal_quantiles(healthy_runs, trim_s=args.trim_s)
+    
     thresholds = {
-        "T_conn": connection_threshold,
         "T_cpu": scheduler_threshold,
         "T_worker": scheduler_threshold,
     }
 
+    # save the payload
     payload = {
         "stage_a_dir": stage_dir,
         "rho_center_fixed": counts["rho_center_fixed"],
         "epsilon_fixed": counts["epsilon_fixed"],
         "normalizers": normalizers,
         "thresholds": thresholds,
+        "cheap_signal_rule": "scheduler_mean_or_connection_p25_gt_healthy_p95",
+        "cheap_signal_quantiles": cheap_quantiles,
     }
     write_json(output, payload)
     print(f"Wrote {output}")
