@@ -32,6 +32,8 @@ import (
 type AnomalyPayload struct {
 	Rho              float64   `json:"rho"`
 	WindowStart      int       `json:"window_start"`
+	MaxWorkers       uint64    `json:"MaxWorkers"`
+	AvgInFlight      float64   `json:"AvgInFlight"`
 	PacerDelays      []float64 `json:"PacerDelays"`
 	SchedulerDelays  []float64 `json:"SchedulerDelays"`
 	ConnectionDelays []float64 `json:"ConnectionDelays"`
@@ -75,7 +77,7 @@ func cloneFloat64s(values []float64) []float64 {
 	return cloned
 }
 
-func emitWindowAnomalyPayload(window *WindowStats, summary windowSummary) {
+func emitWindowAnomalyPayload(window *WindowStats, summary windowSummary, maxWorkers uint64) {
 
 	// obtain the rho value from the window summary
 	rho := summary.ObservedR
@@ -89,6 +91,8 @@ func emitWindowAnomalyPayload(window *WindowStats, summary windowSummary) {
 	emitAnomalyPayload(AnomalyPayload{
 		Rho:              rho,
 		WindowStart:      int(window.Start.UnixMilli()),
+		MaxWorkers:       maxWorkers,
+		AvgInFlight:      summary.AvgInFlight,
 		PacerDelays:      cloneFloat64s(window.PacerWaitSamples),
 		SchedulerDelays:  cloneFloat64s(window.SchedulerDelaySamples),
 		ConnectionDelays: cloneFloat64s(window.ConnDelaySamples),
@@ -475,7 +479,7 @@ func attack(opts *attackOpts) (err error) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, opts.windowSampleRetention, opts.xlgInspector, traces)
+	return processAttack(atk, res, enc, sig, pm, dm, mw, sw, ww, llRef, opts.metricsInterval, opts.sampleInterval, opts.windowSampleRetention, opts.xlgInspector, opts.maxWorkers, traces)
 }
 
 func hasAnyValidSamples(window *WindowStats) bool {
@@ -504,6 +508,7 @@ func processAttack(
 	sampleInterval time.Duration,
 	windowSampleRetention float64,
 	xlgInspector bool,
+	maxWorkers uint64,
 	traces <-chan *vegeta.RequestRecord,
 ) error {
 
@@ -555,7 +560,7 @@ func processAttack(
 
 					// on a window tick, report the anomaly payload for the window
 					if xlgInspector {
-						emitWindowAnomalyPayload(window, summary)
+						emitWindowAnomalyPayload(window, summary, maxWorkers)
 					}
 
 					// write the window samples to the CSV file if provided
@@ -602,7 +607,7 @@ func processAttack(
 
 					// to ensure no data loss at the end, emit for final window
 					if xlgInspector {
-						emitWindowAnomalyPayload(window, summary)
+						emitWindowAnomalyPayload(window, summary, maxWorkers)
 					}
 
 					// write the window samples to the CSV file if provided
@@ -750,7 +755,7 @@ func processAttack(
 			}
 
 			if xlgInspector {
-				emitWindowAnomalyPayload(window, summary)
+				emitWindowAnomalyPayload(window, summary, maxWorkers)
 			}
 
 			// write the window samples to the CSV file if provided
