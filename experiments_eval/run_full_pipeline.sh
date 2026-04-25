@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
-trap 'clear_client_network_delay' EXIT
+trap 'clear_client_network_delay; stop_sudo_keepalive' EXIT
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -19,6 +19,7 @@ STAGE_B_RPS="${STAGE_B_RPS:-${TARGET_RPS:-${BASELINE_RPS:-}}}"
 STAGE_A_DIR="${STAGE_A_DIR:-${OUTPUT_ROOT}/stage_a_fixed/run_${STAMP}}"
 STAGE_B_DIR="${STAGE_B_DIR:-${OUTPUT_ROOT}/stage_b_variable/run_${STAMP}}"
 export OUTPUT_ROOT STAGE_A_DIR STAGE_B_DIR
+start_sudo_keepalive
 
 run_with_optional_rate() {
   local rate="$1"

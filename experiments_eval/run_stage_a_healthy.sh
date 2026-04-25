@@ -9,16 +9,17 @@ source "${SCRIPT_DIR}/common.sh"
 DURATION="${DURATION:-10s}"
 RATE="${RATE:-${BASELINE_RPS:-4000}}"
 NUM_HEALTHY_RUNS="${NUM_HEALTHY_RUNS:-2}"
-NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-5ms}"
 
 # creating output directory for this experiment
 STAMP="$(date +%Y%m%d_%H%M%S)"
 STAGE_A_DIR="${STAGE_A_DIR:-${OUTPUT_ROOT}/stage_a_fixed/run_${STAMP}}"
 
-trap 'stop_cpu_stress; clear_client_network_delay' EXIT
+trap 'stop_cpu_stress; clear_client_network_delay; stop_sudo_keepalive' EXIT
 
 mkdir -p "$STAGE_A_DIR"
 require_targets_file "$TARGETS_FILE"
+start_sudo_keepalive
 set_client_network_delay "$NORMAL_NETWORK_DELAY"
 
 # using healthy resources, create the reference CSV

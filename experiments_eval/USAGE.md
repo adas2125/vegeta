@@ -21,8 +21,8 @@ Defaults:
 - normal client-side network delay: `5ms`
 - degraded client-side network delay: `10ms`
 - faster client-side network delay: netem removed
-- CPU contention: background `yes` processes; defaults are mild/mod/severe = `25/50/75` jobs
-- Worker and connection bottlenecks: mild/mod/severe use `0.80/0.65/0.50` of baseline concurrency, estimated as configured baseline RPS times measured mean latency from trimmed baseline windows
+- CPU contention: background `yes` processes; defaults are mild/mod/severe = `150/200/250` jobs
+- Worker and connection bottlenecks: caps come from Stage B baseline latency plus mild/mod/severe offsets of `6ms/4ms/2ms`; Stage B ramps network delay on top of normal delay during these runs
 
 The shell scripts now print concise progress only. Per-run details are kept in each output directory.
 
@@ -73,7 +73,7 @@ VEGETA_LOGICAL_CPUS=1 \
 experiments_eval/run_full_pipeline.sh
 ```
 
-`BASELINE_RPS` is used for Stage A calibration. `TARGET_RPS` is used for the Stage B healthy baseline, Stage B fault sizing, and Stage B condition/fault runs. If `TARGET_RPS` is not set, Stage B falls back to `BASELINE_RPS`. The older names `RATE` and `EVAL_RATE` still work as aliases.
+`BASELINE_RPS` is used for Stage A calibration. `TARGET_RPS` is used for the Stage B healthy baseline, Stage B fault settings, and Stage B condition/fault runs. If `TARGET_RPS` is not set, Stage B falls back to `BASELINE_RPS`. The older names `RATE` and `EVAL_RATE` still work as aliases.
 
 ## Manual Steps
 
@@ -137,7 +137,6 @@ Stage A count analysis creates:
 - `stage_a_counts.json`
 - `rate`
 - `rho_center_fixed`, `epsilon_fixed`
-- mild/mod/severe worker and connection counts
 
 Stage A threshold analysis creates:
 
@@ -145,9 +144,9 @@ Stage A threshold analysis creates:
 - EMD normalizers
 - `T_conn`, `T_cpu`, `T_worker` from the healthy-window score percentile (`--threshold-quantile`, default `0.90`)
 
-The EMD reference, normalizers, thresholds, and Stage B replay use Vegeta's `XLG-WINDOW` anomaly payloads from `xlg_windows_rps*.log`. Window summary CSVs are still used for count/reference setup fields such as latency and observed R.
+The EMD reference, normalizers, thresholds, and Stage B replay use Vegeta's `XLG-WINDOW` anomaly payloads from `xlg_windows_rps*.log`. Window summary CSVs are still used for setup fields such as latency and observed R.
 
-Stage B fault-setting analysis creates `stage_b_reference.json` with the target rate and mild/mod/severe settings used for Stage B fault injection.
+Stage B fault-setting analysis creates `stage_b_reference.json` with the target rate and mild/mod/severe CPU, worker, and connection settings used for Stage B fault injection.
 
 Stage B conditions create:
 
@@ -155,8 +154,8 @@ Stage B conditions create:
 - `SUT_DEGRADED` with client-side network delay `10ms`
 - `SUT_FASTER` with client-side network delay removed
 - `CPU_CONTENTION/mild`, `CPU_CONTENTION/mod`, `CPU_CONTENTION/severe`
-- `FEW_WORKERS/mild`, `FEW_WORKERS/mod`, `FEW_WORKERS/severe`
-- `FEW_CONNECTIONS/mild`, `FEW_CONNECTIONS/mod`, `FEW_CONNECTIONS/severe`
+- `FEW_WORKERS/mild`, `FEW_WORKERS/mod`, `FEW_WORKERS/severe` with fixed Stage B worker caps and a network-delay ramp from normal delay to normal plus `BOTTLENECK_RAMP_EXTRA_DELAY`
+- `FEW_CONNECTIONS/mild`, `FEW_CONNECTIONS/mod`, `FEW_CONNECTIONS/severe` with fixed Stage B connection caps and the same network-delay ramp
 
 Stage B evaluation writes a fresh directory under `evaluation/` with:
 
@@ -169,7 +168,7 @@ Stage B evaluation uses Stage A as the calibration source:
 - EMD reference distributions come from Stage A healthy runs
 - EMD normalizers and thresholds come from `stage_a_thresholds.json`
 - rho center and epsilon come from Stage A baseline calibration
-- Stage B `stage_b_reference.json` is used by condition collection for fault magnitudes, not by evaluation calibration
+- Stage B `stage_b_reference.json` supplies fault-injection settings, not evaluation calibration
 
 Actual labels in the confusion matrix are ordered as:
 
@@ -181,9 +180,9 @@ FEW_CONNECTIONS, FEW_WORKERS, CPU_CONTENTION, SUT_DEGRADED, SUT_FASTER, NORMAL
 
 The scripts create directories with `mkdir -p`. If you reuse an output directory, files from matching run names can be replaced.
 
-One extra reference run is collected in Stage A. Stage B condition collection reuses that Stage A reference CSV so `observed_R` is calibrated against Stage A while the Stage B baseline runs are used only to size injected faults. In the full pipeline, Stage B baseline and condition collection use `TARGET_RPS` when it is set.
+One extra reference run is collected in Stage A. Stage B condition collection reuses that Stage A reference CSV so `observed_R` is calibrated against Stage A. Stage B baseline runs feed the Stage B reference/settings step. In the full pipeline, Stage B baseline and condition collection use `TARGET_RPS` when it is set.
 
-`run_stage_a_mild.sh` is still available for optional mild diagnostic runs, but threshold calibration no longer depends on it.
+For `FEW_WORKERS` and `FEW_CONNECTIONS`, Stage B starts at `NORMAL_NETWORK_DELAY` and applies repeated `tc qdisc replace` calls during the Vegeta run until reaching `NORMAL_NETWORK_DELAY + BOTTLENECK_RAMP_EXTRA_DELAY`. The attack is not paused or restarted while the delay changes.
 
 Run-level prediction replays retained windows through the online diagnosis state machine. The replay starts in `NORMAL` after trimming, uses Stage A rho center for the baseline band, advances one window at a time, and latches the first terminal diagnosis. `FEW_CONNECTIONS` uses high/rising rho with elevated connection delay, `FEW_WORKERS` uses low/falling rho with elevated scheduler delay, and `CPU_CONTENTION` uses high/rising rho with strongly elevated scheduler delay. No whole-run aggregate override is used.
 

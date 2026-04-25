@@ -5,12 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # default parameters
-DURATION="${DURATION:-15s}"
+DURATION="${DURATION:-30s}"
 NUM_EVAL_RUNS="${NUM_EVAL_RUNS:-1}"
 STAGE_B_SEVERITIES="${STAGE_B_SEVERITIES:-mild mod severe}"
-NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
-DEGRADED_NETWORK_DELAY="${DEGRADED_NETWORK_DELAY:-150ms}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-5ms}"
+DEGRADED_NETWORK_DELAY="${DEGRADED_NETWORK_DELAY:-10ms}"
 FASTER_NETWORK_DELAY="${FASTER_NETWORK_DELAY:-0ms}"
+
+# what we are ramping up to (increment or steps controls how gradual ramp is)
+BOTTLENECK_RAMP_EXTRA_DELAY="${BOTTLENECK_RAMP_EXTRA_DELAY:-10ms}"
+BOTTLENECK_RAMP_STEPS="${BOTTLENECK_RAMP_STEPS:-10}"
+BOTTLENECK_RAMP_INCREMENT="${BOTTLENECK_RAMP_INCREMENT-3ms}"
+BOTTLENECK_RAMP_DURATION="${BOTTLENECK_RAMP_DURATION:-$(subtract_time_values "$DURATION" "5s")}"
+BOTTLENECK_RAMP_SPEC="${BOTTLENECK_RAMP_INCREMENT:-$BOTTLENECK_RAMP_STEPS}"
 
 # getting the latest stage A and stage B runs
 STAGE_A_ROOT="${STAGE_A_ROOT:-${OUTPUT_ROOT}/stage_a_fixed}"
@@ -20,10 +27,15 @@ STAGE_B_DIR="${STAGE_B_DIR:-$(ls -d "$STAGE_B_ROOT"/run_* | sort | tail -n 1)}"
 STAGE_B_SETTINGS_JSON="${STAGE_B_SETTINGS_JSON:-${REFERENCE_JSON:-${STAGE_B_DIR}/stage_b_reference.json}}"
 CONDITIONS_DIR="${CONDITIONS_DIR:-${STAGE_B_DIR}/conditions}"
 
-trap 'stop_cpu_stress; clear_client_network_delay' EXIT
+# we start at the normal delay and ramp up to normal + extra delay
+BOTTLENECK_RAMP_START_DELAY="$NORMAL_NETWORK_DELAY"
+BOTTLENECK_RAMP_END_DELAY="$(add_time_values "$NORMAL_NETWORK_DELAY" "$BOTTLENECK_RAMP_EXTRA_DELAY")"
+
+trap 'stop_cpu_stress; stop_client_network_delay_ramps; clear_client_network_delay; stop_sudo_keepalive' EXIT
 
 mkdir -p "$CONDITIONS_DIR"
 require_targets_file "$TARGETS_FILE"
+start_sudo_keepalive
 
 # obtaining the rate from the settings json
 RATE="$(json_value "$STAGE_B_SETTINGS_JSON" "rate")"
@@ -41,12 +53,23 @@ run_case() {
   local connections="$5"
   local max_connections="$6"
   local cpu_jobs="${7:-0}"
+  local network_ramp="${8:-0}"
 
   mkdir -p "$base_dir"
   for run_idx in $(seq 1 "$NUM_EVAL_RUNS"); do
-  # if CPU stress is requested, start it before the attack and stop it after
+    local ramp_pid=""
+    # if CPU stress is requested, start it before the attack and stop it after
     if (( cpu_jobs > 0 )); then
       start_cpu_stress "$cpu_jobs" "${base_dir}/stress_run_$(printf '%02d' "$run_idx").log"
+    fi
+    if [[ "$network_ramp" == "1" ]]; then
+      # if a network ramp is requested, start it before the attack and wait for it after
+      start_client_network_delay_ramp \
+        "$BOTTLENECK_RAMP_START_DELAY" \
+        "$BOTTLENECK_RAMP_END_DELAY" \
+        "$BOTTLENECK_RAMP_DURATION" \
+        "$BOTTLENECK_RAMP_SPEC"
+      ramp_pid="$CLIENT_NETWORK_RAMP_LAST_PID"
     fi
     # run the attack with reference to the stage A results and the specified parameters
     run_attack_to_dir \
@@ -60,7 +83,12 @@ run_case() {
       "$max_workers" \
       "$connections" \
       "$max_connections"
-      # after the attack completes, stop the CPU stress if it was started
+    if [[ -n "$ramp_pid" ]]; then
+      wait "$ramp_pid"
+      NETWORK_RAMP_PIDS=()
+      CLIENT_NETWORK_RAMP_LAST_PID=""
+    fi
+    # after the attack completes, stop the CPU stress if it was started
     if (( cpu_jobs > 0 )); then
       stop_cpu_stress
     fi
@@ -89,7 +117,7 @@ for severity in $STAGE_B_SEVERITIES; do
     "$(json_value "$STAGE_B_SETTINGS_JSON" "severity.cpu.${severity}")"
 done
 
-# run worker condition with varying severity
+# run worker condition with varying severity & network ramp
 for severity in $STAGE_B_SEVERITIES; do
   workers="$(json_value "$STAGE_B_SETTINGS_JSON" "severity.workers.${severity}")"
   run_case \
@@ -98,10 +126,12 @@ for severity in $STAGE_B_SEVERITIES; do
     "$workers" \
     "$workers" \
     "$HEALTHY_CONNECTIONS" \
-    "$HEALTHY_MAX_CONNECTIONS"
+    "$HEALTHY_MAX_CONNECTIONS" \
+    0 \
+    1
 done
 
-# run connection condition with varying severity
+# run connection condition with varying severity & network ramp
 for severity in $STAGE_B_SEVERITIES; do
   connections="$(json_value "$STAGE_B_SETTINGS_JSON" "severity.connections.${severity}")"
   run_case \
@@ -110,7 +140,9 @@ for severity in $STAGE_B_SEVERITIES; do
     "$HEALTHY_WORKERS" \
     "$HEALTHY_MAX_WORKERS" \
     "$connections" \
-    "$connections"
+    "$connections" \
+    0 \
+    1
 done
 
 # run degraded with higher client-side network latency
@@ -146,6 +178,13 @@ targets_file=${TARGETS_FILE}
 normal_network_delay=${NORMAL_NETWORK_DELAY}
 degraded_network_delay=${DEGRADED_NETWORK_DELAY}
 faster_network_delay=${FASTER_NETWORK_DELAY}
+bottleneck_ramp_extra_delay=${BOTTLENECK_RAMP_EXTRA_DELAY}
+bottleneck_ramp_duration=${BOTTLENECK_RAMP_DURATION}
+bottleneck_ramp_increment=${BOTTLENECK_RAMP_INCREMENT}
+bottleneck_ramp_start_delay=${BOTTLENECK_RAMP_START_DELAY}
+bottleneck_ramp_end_delay=${BOTTLENECK_RAMP_END_DELAY}
+bottleneck_ramp_steps=${BOTTLENECK_RAMP_STEPS}
+bottleneck_ramp_spec=${BOTTLENECK_RAMP_SPEC}
 stage_a_dir=${STAGE_A_DIR}
 stage_a_reference_csv=${STAGE_A_REFERENCE_CSV}
 stage_b_settings_json=${STAGE_B_SETTINGS_JSON}

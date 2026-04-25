@@ -4,18 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
-DURATION="${DURATION:-15s}"
+DURATION="${DURATION:-30s}"
 RATE="${RATE:-${TARGET_RPS:-${EVAL_RATE:-${BASELINE_RPS:-3000}}}}"
 NUM_BASELINE_RUNS="${NUM_BASELINE_RUNS:-2}"
-NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-50ms}"
+NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-5ms}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 STAGE_B_DIR="${STAGE_B_DIR:-${OUTPUT_ROOT}/stage_b_variable/run_${STAMP}}"
 
-trap 'stop_cpu_stress; clear_client_network_delay' EXIT
+trap 'stop_cpu_stress; clear_client_network_delay; stop_sudo_keepalive' EXIT
 
 mkdir -p "$STAGE_B_DIR"
 require_targets_file "$TARGETS_FILE"
+start_sudo_keepalive
 set_client_network_delay "$NORMAL_NETWORK_DELAY"
 
 mkdir -p "${STAGE_B_DIR}/baseline_healthy"

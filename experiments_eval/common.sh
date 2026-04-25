@@ -7,16 +7,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/output}"
 
 VEGETA_BIN="${VEGETA_BIN:-${REPO_ROOT}/vegeta}"
+TARGETS_FILE="${TARGETS_FILE:-${REPO_ROOT}/targets.txt}"
 VEGETA_LOGICAL_CPUS="${VEGETA_LOGICAL_CPUS:-4}"
 WINDOW_S="${WINDOW_S:-1}"
 WINDOW_SAMPLE_RETENTION="${WINDOW_SAMPLE_RETENTION:-1.0}"
 
 SERVER_HOST="${SERVER_HOST:-}"
-SERVER_PORT="${SERVER_PORT:-}"
-TARGET_METHOD="${TARGET_METHOD:-GET}"
 NETEM_IFACE="${NETEM_IFACE:-}"
 SLEEP_BETWEEN_RUNS="${SLEEP_BETWEEN_RUNS:-5}"
 CPU_STRESS_WARMUP="${CPU_STRESS_WARMUP:-2}"
+SUDO_KEEPALIVE_INTERVAL_S="${SUDO_KEEPALIVE_INTERVAL_S:-60}"
 
 HEALTHY_WORKERS="${HEALTHY_WORKERS:-10}"
 HEALTHY_MAX_WORKERS="${HEALTHY_MAX_WORKERS:-10000}"
@@ -24,33 +24,60 @@ HEALTHY_CONNECTIONS="${HEALTHY_CONNECTIONS:-10000}"
 HEALTHY_MAX_CONNECTIONS="${HEALTHY_MAX_CONNECTIONS:-0}"
 
 STRESS_PIDS=()
+NETWORK_RAMP_PIDS=()
+CLIENT_NETWORK_RAMP_LAST_PID=""
+SUDO_KEEPALIVE_PID="${SUDO_KEEPALIVE_PID:-}"
+SUDO_KEEPALIVE_OWNED=""
 
 log() {
   echo "[$(date +"%Y-%m-%d %H:%M:%S")] $*"
 }
 
-sut_target_url() {
-  echo "http://${SERVER_HOST}:${SERVER_PORT}/"
-}
+require_targets_file() {
+  local targets_file="${1:-$TARGETS_FILE}"
 
-require_external_sut() {
-  if [[ -z "$SERVER_HOST" || -z "$SERVER_PORT" ]]; then
-    echo "SERVER_HOST and SERVER_PORT are required for external-SUT experiments." >&2
-    echo "Example: SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> experiments_eval/run_full_pipeline.sh" >&2
+  if [[ ! -s "$targets_file" ]]; then
+    echo "Missing or empty targets file: ${targets_file}" >&2
+    echo "Generate one with: python3 scripts/generate_targets.py --output targets.txt" >&2
     exit 1
   fi
 }
 
-write_targets_file() {
-  local targets_file="$1"
+target_host() {
+  local targets_file="${1:-$TARGETS_FILE}"
 
-  require_external_sut
-  mkdir -p "$(dirname "$targets_file")"
-  printf '%s %s\n' "$TARGET_METHOD" "$(sut_target_url)" > "$targets_file"
-  log "target ${TARGET_METHOD} $(sut_target_url)"
+  if [[ -n "$SERVER_HOST" ]]; then
+    echo "$SERVER_HOST"
+    return 0
+  fi
+
+  require_targets_file "$targets_file"
+  python3 - "$targets_file" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+targets_file = sys.argv[1]
+with open(targets_file, encoding="utf-8") as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2:
+            continue
+        host = urlparse(parts[1]).hostname
+        if host:
+            print(host)
+            sys.exit(0)
+
+print(f"Could not infer target host from {targets_file}; set SERVER_HOST or NETEM_IFACE.", file=sys.stderr)
+sys.exit(1)
+PY
 }
 
 client_netem_iface() {
+  local host="${1:-}"
+
   if [[ -n "$NETEM_IFACE" ]]; then
     echo "$NETEM_IFACE"
     return 0
@@ -61,7 +88,11 @@ client_netem_iface() {
     exit 1
   fi
 
-  ip route get "$SERVER_HOST" | awk '{
+  if [[ -z "$host" ]]; then
+    host="$(target_host)"
+  fi
+
+  ip route get "$host" | awk '{
     for (i = 1; i <= NF; i++) {
       if ($i == "dev") {
         print $(i + 1)
@@ -71,27 +102,115 @@ client_netem_iface() {
   }'
 }
 
+start_sudo_keepalive() {
+  if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
+    return 0
+  fi
+
+  SUDO_KEEPALIVE_PID=""
+
+  log "acquiring sudo credentials for client netem"
+  sudo -v
+
+  (
+    while true; do
+      sleep "$SUDO_KEEPALIVE_INTERVAL_S"
+      sudo -n true >/dev/null 2>&1 || exit 0
+    done
+  ) &
+
+  SUDO_KEEPALIVE_PID="$!"
+  SUDO_KEEPALIVE_OWNED="1"
+  export SUDO_KEEPALIVE_PID
+}
+
+stop_sudo_keepalive() {
+  if [[ "${SUDO_KEEPALIVE_OWNED:-}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  fi
+
+  SUDO_KEEPALIVE_PID=""
+  SUDO_KEEPALIVE_OWNED=""
+  unset SUDO_KEEPALIVE_PID
+}
+
 set_client_network_delay() {
   local delay="$1"
+  local host
   local iface
 
-  require_external_sut
-  iface="$(client_netem_iface)"
+  if [[ -n "$NETEM_IFACE" ]]; then
+    iface="$NETEM_IFACE"
+  else
+    host="$(target_host)"
+    iface="$(client_netem_iface "$host")"
+  fi
+
   if [[ -z "$iface" ]]; then
-    echo "Could not infer client network interface for SERVER_HOST=${SERVER_HOST}; set NETEM_IFACE." >&2
+    echo "Could not infer client network interface for target host ${host}; set NETEM_IFACE." >&2
     exit 1
   fi
 
+  start_sudo_keepalive
   log "client netem delay=${delay} iface=${iface}"
-  sudo tc qdisc replace dev "$iface" root netem delay "$delay"
+  sudo -n tc qdisc replace dev "$iface" root netem delay "$delay"
+}
+
+add_time_values() {
+  python3 "${REPO_ROOT}/scripts_eval/time_values.py" add "$1" "$2"
+}
+
+subtract_time_values() {
+  python3 "${REPO_ROOT}/scripts_eval/time_values.py" subtract "$1" "$2"
+}
+
+client_network_delay_ramp() {
+  local start_delay="$1"
+  local end_delay="$2"
+  local duration="$3"
+  local steps="${4:-10}"
+  local delay
+  local sleep_s
+
+  while read -r delay sleep_s; do
+    set_client_network_delay "$delay"
+    case "$sleep_s" in
+      0|0.0|0.000000) ;;
+      *) sleep "$sleep_s" ;;
+    esac
+  done < <(
+    python3 "${REPO_ROOT}/scripts_eval/time_values.py" ramp \
+      "$start_delay" \
+      "$end_delay" \
+      "$duration" \
+      "$steps"
+  )
+}
+
+start_client_network_delay_ramp() {
+  CLIENT_NETWORK_RAMP_LAST_PID=""
+  client_network_delay_ramp "$@" &
+  CLIENT_NETWORK_RAMP_LAST_PID="$!"
+  NETWORK_RAMP_PIDS+=("$CLIENT_NETWORK_RAMP_LAST_PID")
+}
+
+stop_client_network_delay_ramps() {
+  local pid
+  for pid in "${NETWORK_RAMP_PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  NETWORK_RAMP_PIDS=()
+  CLIENT_NETWORK_RAMP_LAST_PID=""
 }
 
 clear_client_network_delay() {
   local iface
-
-  if [[ -z "$SERVER_HOST" && -z "$NETEM_IFACE" ]]; then
-    return 0
-  fi
 
   iface="$(client_netem_iface 2>/dev/null || true)"
   if [[ -z "$iface" ]]; then
@@ -99,7 +218,7 @@ clear_client_network_delay() {
   fi
 
   log "client netem clear iface=${iface}"
-  sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+  sudo -n tc qdisc del dev "$iface" root 2>/dev/null || true
 }
 
 start_cpu_stress() {
@@ -143,6 +262,7 @@ run_attack_to_dir() {
   local max_connections="${10}"
   shift 10
 
+  require_targets_file "$targets_file"
   mkdir -p "$case_dir"
 
   local metrics_csv="${case_dir}/metrics_rps${rate}.csv"
