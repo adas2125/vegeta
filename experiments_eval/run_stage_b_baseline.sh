@@ -6,7 +6,6 @@ source "${SCRIPT_DIR}/common.sh"
 
 DURATION="${DURATION:-30s}"
 RATE="${RATE:-${TARGET_RPS:-${EVAL_RATE:-${BASELINE_RPS:-3000}}}}"
-NUM_BASELINE_RUNS="${NUM_BASELINE_RUNS:-2}"
 NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-5ms}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -20,28 +19,24 @@ start_sudo_keepalive
 set_client_network_delay "$NORMAL_NETWORK_DELAY"
 
 mkdir -p "${STAGE_B_DIR}/baseline_healthy"
-for run_idx in $(seq 1 "$NUM_BASELINE_RUNS"); do
-  run_attack_to_dir \
-    "${STAGE_B_DIR}/baseline_healthy/run_$(printf '%02d' "$run_idx")" \
-    "stage_b_baseline_run_${run_idx}" \
-    "$RATE" \
-    "$DURATION" \
-    "$TARGETS_FILE" \
-    "" \
-    "$HEALTHY_WORKERS" \
-    "$HEALTHY_MAX_WORKERS" \
-    "$HEALTHY_CONNECTIONS" \
-    "$HEALTHY_MAX_CONNECTIONS"
-done
+run_attack_to_dir \
+  "${STAGE_B_DIR}/baseline_healthy/run_01" \
+  "stage_b_baseline_run_1" \
+  "$RATE" \
+  "$DURATION" \
+  "$TARGETS_FILE" \
+  "" \
+  "$HEALTHY_WORKERS" \
+  "$HEALTHY_MAX_WORKERS" \
+  "$HEALTHY_CONNECTIONS" \
+  "$HEALTHY_MAX_CONNECTIONS"
 
 cat > "${STAGE_B_DIR}/run_config.env" <<EOF
 stage=stage_b_variable_baseline
 rate=${RATE}
 duration=${DURATION}
-target_host=$(target_host)
 targets_file=${TARGETS_FILE}
 normal_network_delay=${NORMAL_NETWORK_DELAY}
-num_baseline_runs=${NUM_BASELINE_RUNS}
 output_dir=${STAGE_B_DIR}
 EOF
 

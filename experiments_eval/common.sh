@@ -8,11 +8,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/output}"
 
 VEGETA_BIN="${VEGETA_BIN:-${REPO_ROOT}/vegeta}"
 TARGETS_FILE="${TARGETS_FILE:-${REPO_ROOT}/targets.txt}"
-VEGETA_LOGICAL_CPUS="${VEGETA_LOGICAL_CPUS:-4}"
-WINDOW_S="${WINDOW_S:-1}"
-WINDOW_SAMPLE_RETENTION="${WINDOW_SAMPLE_RETENTION:-1.0}"
 
-SERVER_HOST="${SERVER_HOST:-}"
 NETEM_IFACE="${NETEM_IFACE:-}"
 SLEEP_BETWEEN_RUNS="${SLEEP_BETWEEN_RUNS:-5}"
 CPU_STRESS_WARMUP="${CPU_STRESS_WARMUP:-2}"
@@ -38,68 +34,8 @@ require_targets_file() {
 
   if [[ ! -s "$targets_file" ]]; then
     echo "Missing or empty targets file: ${targets_file}" >&2
-    echo "Generate one with: python3 scripts/generate_targets.py --output targets.txt" >&2
     exit 1
   fi
-}
-
-target_host() {
-  local targets_file="${1:-$TARGETS_FILE}"
-
-  if [[ -n "$SERVER_HOST" ]]; then
-    echo "$SERVER_HOST"
-    return 0
-  fi
-
-  require_targets_file "$targets_file"
-  python3 - "$targets_file" <<'PY'
-import sys
-from urllib.parse import urlparse
-
-targets_file = sys.argv[1]
-with open(targets_file, encoding="utf-8") as handle:
-    for raw_line in handle:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(maxsplit=1)
-        if len(parts) < 2:
-            continue
-        host = urlparse(parts[1]).hostname
-        if host:
-            print(host)
-            sys.exit(0)
-
-print(f"Could not infer target host from {targets_file}; set SERVER_HOST or NETEM_IFACE.", file=sys.stderr)
-sys.exit(1)
-PY
-}
-
-client_netem_iface() {
-  local host="${1:-}"
-
-  if [[ -n "$NETEM_IFACE" ]]; then
-    echo "$NETEM_IFACE"
-    return 0
-  fi
-
-  if ! command -v ip >/dev/null 2>&1; then
-    echo "ip command not found; set NETEM_IFACE explicitly." >&2
-    exit 1
-  fi
-
-  if [[ -z "$host" ]]; then
-    host="$(target_host)"
-  fi
-
-  ip route get "$host" | awk '{
-    for (i = 1; i <= NF; i++) {
-      if ($i == "dev") {
-        print $(i + 1)
-        exit
-      }
-    }
-  }'
 }
 
 start_sudo_keepalive() {
@@ -141,24 +77,10 @@ stop_sudo_keepalive() {
 
 set_client_network_delay() {
   local delay="$1"
-  local host
-  local iface
-
-  if [[ -n "$NETEM_IFACE" ]]; then
-    iface="$NETEM_IFACE"
-  else
-    host="$(target_host)"
-    iface="$(client_netem_iface "$host")"
-  fi
-
-  if [[ -z "$iface" ]]; then
-    echo "Could not infer client network interface for target host ${host}; set NETEM_IFACE." >&2
-    exit 1
-  fi
 
   start_sudo_keepalive
-  log "client netem delay=${delay} iface=${iface}"
-  sudo -n tc qdisc replace dev "$iface" root netem delay "$delay"
+  log "client netem delay=${delay} iface=${NETEM_IFACE}"
+  sudo -n tc qdisc replace dev "$NETEM_IFACE" root netem delay "$delay"
 }
 
 add_time_values() {
@@ -210,15 +132,8 @@ stop_client_network_delay_ramps() {
 }
 
 clear_client_network_delay() {
-  local iface
-
-  iface="$(client_netem_iface 2>/dev/null || true)"
-  if [[ -z "$iface" ]]; then
-    return 0
-  fi
-
-  log "client netem clear iface=${iface}"
-  sudo -n tc qdisc del dev "$iface" root 2>/dev/null || true
+  log "client netem clear iface=${NETEM_IFACE}"
+  sudo -n tc qdisc del dev "$NETEM_IFACE" root 2>/dev/null || true
 }
 
 start_cpu_stress() {
@@ -284,13 +199,10 @@ run_attack_to_dir() {
     -max-workers="$max_workers"
     -connections="$connections"
     -max-connections="$max_connections"
-    -keepalive=true
     -http2=false
-    -metrics-interval="${WINDOW_S}s"
     -metrics-csv="$metrics_csv"
     -window-csv="$window_csv"
     -window-samples-csv="$samples_csv"
-    -window-sample-retention="$WINDOW_SAMPLE_RETENTION"
     -output="$results_bin"
   )
 
@@ -299,9 +211,9 @@ run_attack_to_dir() {
   fi
 
   attack_args+=("$@")
-  "$VEGETA_BIN" -cpus="$VEGETA_LOGICAL_CPUS" "${attack_args[@]}" > "$xlg_log"
-  "$VEGETA_BIN" -cpus="$VEGETA_LOGICAL_CPUS" report "$results_bin" > "$report_txt"
-  "$VEGETA_BIN" -cpus="$VEGETA_LOGICAL_CPUS" report -type=json "$results_bin" > "$report_json"
+  "$VEGETA_BIN" "${attack_args[@]}" > "$xlg_log"
+  "$VEGETA_BIN" report "$results_bin" > "$report_txt"
+  "$VEGETA_BIN" report -type=json "$results_bin" > "$report_json"
 
   cat > "${case_dir}/run_meta.env" <<EOF
 label=${label}
@@ -312,8 +224,6 @@ max_workers=${max_workers}
 connections=${connections}
 max_connections=${max_connections}
 reference_csv=${reference_csv}
-vegeta_logical_cpus=${VEGETA_LOGICAL_CPUS}
-window_s=${WINDOW_S}
 EOF
 
   log "done ${label}: ${case_dir}"

@@ -60,7 +60,6 @@ cat > "${STAGE_A_DIR}/run_config.env" <<EOF
 stage=stage_a_fixed
 rate=${RATE}
 duration=${DURATION}
-target_host=$(target_host)
 targets_file=${TARGETS_FILE}
 normal_network_delay=${NORMAL_NETWORK_DELAY}
 num_healthy_runs=${NUM_HEALTHY_RUNS}

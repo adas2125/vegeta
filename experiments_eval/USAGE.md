@@ -6,7 +6,7 @@ Collection scripts live in `experiments_eval`, analysis scripts live in `scripts
 
 - Build or keep a Vegeta binary at `./vegeta`, or set `VEGETA_BIN`.
 - Start the SUT server on a separate VM before running the scripts.
-- Set `SERVER_HOST` and `SERVER_PORT` for every collection run. The scripts do not start or stop a local server.
+- Set `NETEM_IFACE` for every collection run. The scripts do not start or stop a local server.
 - Install `tc` on the load-generator VM and run with sudo access for client-side netem.
 - Python needs `pandas`, `numpy`, `scipy`, and `matplotlib`.
 
@@ -15,9 +15,7 @@ Defaults:
 - run duration: `15s`
 - XLG trim: first `5s` plus the final window
 - window size: `1s`
-- Vegeta logical CPUs: `VEGETA_LOGICAL_CPUS=4`
 - metrics: `scheduler_delay`, `connection_delay`, `rho`
-- SUT endpoint: `http://${SERVER_HOST}:${SERVER_PORT}/`
 - normal client-side network delay: `5ms`
 - degraded client-side network delay: `10ms`
 - faster client-side network delay: netem removed
@@ -26,15 +24,14 @@ Defaults:
 
 The shell scripts now print concise progress only. Per-run details are kept in each output directory.
 
-The collection scripts set client-side netem automatically on the load-generator VM. They infer the interface from the route to `SERVER_HOST`; set `NETEM_IFACE=<iface>` only if that inference is wrong. Netem is removed automatically on script exit.
+The collection scripts set client-side netem automatically on the load-generator VM using `NETEM_IFACE`. Netem is removed automatically on script exit.
 
 ## Full Pipeline
 
 Run everything in order:
 
 ```bash
-SERVER_HOST=<sut-vm-ip> \
-SERVER_PORT=<sut-port> \
+NETEM_IFACE=<iface> \
 BASELINE_RPS=3000 \
 TARGET_RPS=3000 \
 experiments_eval/run_full_pipeline.sh
@@ -60,8 +57,7 @@ experiments_eval/output/stage_b_variable/run_<timestamp>/
 Useful quick-run override:
 
 ```bash
-SERVER_HOST=<sut-vm-ip> \
-SERVER_PORT=<sut-port> \
+NETEM_IFACE=<iface> \
 DURATION=15s \
 NUM_HEALTHY_RUNS=3 \
 NUM_BASELINE_RUNS=3 \
@@ -69,7 +65,6 @@ NUM_EVAL_RUNS=1 \
 BASELINE_RPS=400 \
 TARGET_RPS=500 \
 STAGE_B_SEVERITIES="mod severe" \
-VEGETA_LOGICAL_CPUS=1 \
 experiments_eval/run_full_pipeline.sh
 ```
 
@@ -80,8 +75,7 @@ experiments_eval/run_full_pipeline.sh
 Collect Stage A healthy external-SUT runs:
 
 ```bash
-SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> \
-experiments_eval/run_stage_a_healthy.sh
+NETEM_IFACE=<iface> experiments_eval/run_stage_a_healthy.sh
 ```
 
 Compute Stage A counts and severity settings:
@@ -101,8 +95,7 @@ python3 scripts_eval/stage_a_thresholds.py \
 Collect Stage B healthy external-SUT baseline runs:
 
 ```bash
-SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> \
-TARGET_RPS=5000 experiments_eval/run_stage_b_baseline.sh
+NETEM_IFACE=<iface> TARGET_RPS=5000 experiments_eval/run_stage_b_baseline.sh
 ```
 
 Compute Stage B fault injection settings:
@@ -115,8 +108,7 @@ python3 scripts_eval/stage_b_reference.py \
 Collect Stage B condition runs:
 
 ```bash
-SERVER_HOST=<sut-vm-ip> \
-SERVER_PORT=<sut-port> \
+NETEM_IFACE=<iface> \
 STAGE_A_DIR=experiments_eval/output/stage_a_fixed/run_<timestamp> \
 STAGE_B_DIR=experiments_eval/output/stage_b_variable/run_<timestamp> \
   experiments_eval/run_stage_b_conditions.sh
@@ -188,15 +180,14 @@ Run-level prediction replays retained windows through the online diagnosis state
 
 Useful overrides:
 
-Assume `SERVER_HOST` and `SERVER_PORT` are set in the environment for these examples.
+Assume `NETEM_IFACE` is set in the environment for these examples.
 
 ```bash
-VEGETA_LOGICAL_CPUS=1 experiments_eval/run_full_pipeline.sh
 VEGETA_BIN=./vegeta_local experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3500 experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3000 TARGET_RPS=5000 experiments_eval/run_full_pipeline.sh
 BASELINE_RPS=3500 experiments_eval/run_stage_a_healthy.sh
-SERVER_HOST=<sut-vm-ip> SERVER_PORT=<sut-port> experiments_eval/run_stage_b_baseline.sh
+TARGET_RPS=5000 experiments_eval/run_stage_b_baseline.sh
 NETEM_IFACE=ens33 experiments_eval/run_full_pipeline.sh
 STAGE_B_SEVERITIES="mod severe" NUM_EVAL_RUNS=1 experiments_eval/run_stage_b_conditions.sh
 TARGET_RPS=500 experiments_eval/run_stage_b_conditions.sh

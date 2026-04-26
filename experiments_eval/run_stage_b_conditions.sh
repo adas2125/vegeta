@@ -12,12 +12,10 @@ NORMAL_NETWORK_DELAY="${NORMAL_NETWORK_DELAY:-5ms}"
 DEGRADED_NETWORK_DELAY="${DEGRADED_NETWORK_DELAY:-10ms}"
 FASTER_NETWORK_DELAY="${FASTER_NETWORK_DELAY:-0ms}"
 
-# what we are ramping up to (increment or steps controls how gradual ramp is)
+# what we are ramping up to
 BOTTLENECK_RAMP_EXTRA_DELAY="${BOTTLENECK_RAMP_EXTRA_DELAY:-10ms}"
-BOTTLENECK_RAMP_STEPS="${BOTTLENECK_RAMP_STEPS:-10}"
-BOTTLENECK_RAMP_INCREMENT="${BOTTLENECK_RAMP_INCREMENT-3ms}"
+BOTTLENECK_RAMP_INCREMENT="${BOTTLENECK_RAMP_INCREMENT:-3ms}"
 BOTTLENECK_RAMP_DURATION="${BOTTLENECK_RAMP_DURATION:-$(subtract_time_values "$DURATION" "5s")}"
-BOTTLENECK_RAMP_SPEC="${BOTTLENECK_RAMP_INCREMENT:-$BOTTLENECK_RAMP_STEPS}"
 
 # getting the latest stage A and stage B runs
 STAGE_A_ROOT="${STAGE_A_ROOT:-${OUTPUT_ROOT}/stage_a_fixed}"
@@ -68,7 +66,7 @@ run_case() {
         "$BOTTLENECK_RAMP_START_DELAY" \
         "$BOTTLENECK_RAMP_END_DELAY" \
         "$BOTTLENECK_RAMP_DURATION" \
-        "$BOTTLENECK_RAMP_SPEC"
+        "$BOTTLENECK_RAMP_INCREMENT"
       ramp_pid="$CLIENT_NETWORK_RAMP_LAST_PID"
     fi
     # run the attack with reference to the stage A results and the specified parameters
@@ -173,7 +171,6 @@ eval_rate=${EVAL_RATE}
 duration=${DURATION}
 num_eval_runs=${NUM_EVAL_RUNS}
 stage_b_severities=${STAGE_B_SEVERITIES}
-target_host=$(target_host)
 targets_file=${TARGETS_FILE}
 normal_network_delay=${NORMAL_NETWORK_DELAY}
 degraded_network_delay=${DEGRADED_NETWORK_DELAY}
@@ -183,8 +180,6 @@ bottleneck_ramp_duration=${BOTTLENECK_RAMP_DURATION}
 bottleneck_ramp_increment=${BOTTLENECK_RAMP_INCREMENT}
 bottleneck_ramp_start_delay=${BOTTLENECK_RAMP_START_DELAY}
 bottleneck_ramp_end_delay=${BOTTLENECK_RAMP_END_DELAY}
-bottleneck_ramp_steps=${BOTTLENECK_RAMP_STEPS}
-bottleneck_ramp_spec=${BOTTLENECK_RAMP_SPEC}
 stage_a_dir=${STAGE_A_DIR}
 stage_a_reference_csv=${STAGE_A_REFERENCE_CSV}
 stage_b_settings_json=${STAGE_B_SETTINGS_JSON}
