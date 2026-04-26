@@ -333,10 +333,13 @@ def leave_one_out_normalizers(
     raw_by_metric: dict[str, list[float]] = {"scheduler_delay": []}
     for run_dir in run_list:
         others = [path for path in run_list if path != run_dir]
+        # obtain the scheduler delays for the current run
         current = run_metric_values(run_dir, "scheduler_delay", trim_s=trim_s)
+        # obtain the scheduler delays for the other normal runs that are not current
         reference = pooled_metric_values(others, "scheduler_delay", trim_s=trim_s)
         raw_by_metric["scheduler_delay"].append(raw_emd(current, reference))
     
+    # for now, it should only be scheduler_delay
     normalizers: dict[str, float] = {}
     for metric, values in raw_by_metric.items():
         q95 = quantile(values, 0.95)
@@ -454,7 +457,7 @@ def transition_window(
     state.previous_rho = rho
 
     # since we are near the worker cap and scheduler is elevated, we check for FEW_WORKERS
-    if worker_cap_near and worker_sched_elevated and scheduler_quantile_trigger:
+    if worker_cap_near and worker_sched_elevated:
         if rho_high:
             fallback_label = "SUT_DEGRADED"
         elif rho_low:

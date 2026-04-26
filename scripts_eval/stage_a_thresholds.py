@@ -62,18 +62,15 @@ def score_quantile(values: pd.Series, q: float) -> float:
 
 def main() -> None:
     args = parse_args()
-    # obtaining the directories from stage a, output file will be 'stage_a_thresholds.json'
-    # reading in the counts from stage a
     stage_dir = args.stage_a_dir
     output = stage_dir / "stage_a_thresholds.json"
     counts_json = stage_dir / "stage_a_counts.json"
     counts = read_json(counts_json)
-    
-    # these are the path names of the healthy runs
+
+    # path names of the healthy runs
     healthy_runs = run_dirs(stage_dir / "healthy")
     
-    # compute the normalizers using a leave-out strategy
-    # normalizers now computed run-level (leave_one_out makes sense if there are more baselines)
+    # compute the normalizers using a leave-out strategy (makes more sense w/ more baselines)
     normalizers = leave_one_out_normalizers(healthy_runs, trim_s=args.trim_s)
 
     # returns for each window, the scheduler scores w/ the normalizers applied, as well as rho values

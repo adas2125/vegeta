@@ -65,13 +65,12 @@ def main() -> None:
 
     # get the healthy runs for Stage B
     healthy_runs = run_dirs(stage_dir / "baseline_healthy")
-    if not healthy_runs:
-        raise ValueError("at least one Stage B healthy run is needed")
 
     # obtain the rate
     rate = read_rate(stage_dir)
     baseline_latency_ms = baseline_mean_total_latency_ms(healthy_runs, trim_s=args.trim_s)
     caps = caps_from_latency(rate, baseline_latency_ms)
+    print(f"baseline latency: {baseline_latency_ms:.2f} ms, caps: {caps}, rate: {rate} rps, CPU jobs: {cpu_jobs_from_profile(rate)}")
 
     payload = {
         "rate": rate,
