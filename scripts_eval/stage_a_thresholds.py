@@ -24,10 +24,7 @@ DEFAULT_THRESHOLD_QUANTILE = 0.90
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute Stage A EMD thresholds.")
     parser.add_argument("--stage-a-dir", type=Path, required=True)
-    parser.add_argument("--counts-json", type=Path, default=None)
-    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--trim-s", type=float, default=5.0)
-    parser.add_argument("--threshold-quantile", type=float, default=DEFAULT_THRESHOLD_QUANTILE)
     return parser.parse_args()
 
 
@@ -68,19 +65,13 @@ def main() -> None:
     # obtaining the directories from stage a, output file will be 'stage_a_thresholds.json'
     # reading in the counts from stage a
     stage_dir = args.stage_a_dir
-    output = args.output or stage_dir / "stage_a_thresholds.json"
-    counts_json = args.counts_json or stage_dir / "stage_a_counts.json"
-
-    if not 0 < args.threshold_quantile <= 1:
-        raise ValueError("--threshold-quantile must be in (0, 1]")
-
+    output = stage_dir / "stage_a_thresholds.json"
+    counts_json = stage_dir / "stage_a_counts.json"
     counts = read_json(counts_json)
+    
     # these are the path names of the healthy runs
     healthy_runs = run_dirs(stage_dir / "healthy")
-    if len(healthy_runs) < 2:
-        raise ValueError("at least two healthy runs are needed for leave-one-out EMD")
     
-
     # compute the normalizers using a leave-out strategy
     # normalizers now computed run-level (leave_one_out makes sense if there are more baselines)
     normalizers = leave_one_out_normalizers(healthy_runs, trim_s=args.trim_s)
@@ -93,7 +84,7 @@ def main() -> None:
     )
 
     # obtain scheduler thresholds based on the provided quantile of the healthy window scores aggregated across all healthy runs
-    scheduler_threshold = score_quantile(healthy_windows["scheduler_score"], args.threshold_quantile)
+    scheduler_threshold = score_quantile(healthy_windows["scheduler_score"], DEFAULT_THRESHOLD_QUANTILE)
     cheap_quantiles = cheap_signal_quantiles(healthy_runs, trim_s=args.trim_s)
     
     thresholds = {
