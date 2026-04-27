@@ -1,277 +1,193 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
 import json
 import math
 import queue
 import sys
 import threading
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
-import pandas as pd
+from typing import Any
 
-# User-defined functions
-from utils import normalized_emd, trim_window_margins
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts_eval"))
 
-# prefix we are filtering for in the incoming telemetry stream
+from xlg_eval_common import (
+    DiagnosisState,
+    cheap_signal_trigger,
+    is_worker_cap_near,
+    mean,
+    median,
+    normalized_score,
+    pooled_reference,
+    quantile,
+    raw_emd,
+    read_json,
+    run_dirs,
+    should_compute_emd,
+    transition_window,
+)
+
+
 WINDOW_PREFIX = "XLG-WINDOW:"
 QUEUE_MAXSIZE = 100
 
-# a bounded capacity queue to hold incoming windows until the consumer can process them
-payload_queue: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=QUEUE_MAXSIZE)
-
-# the metrics we are after
-METRIC_CONFIG = {
-    "pacer_emd": ("pacer_wait", "PacerDelays"),
-    "scheduler_emd": ("scheduler_delay", "SchedulerDelays"),
-    "connection_emd": ("conn_delay", "ConnectionDelays"),
-}
-TRIM_START_WINDOWS = 1
-TRIM_END_WINDOWS = 1
-SKIP_INITIAL_WINDOWS = 2
+payload_queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue(maxsize=QUEUE_MAXSIZE)
 
 
-# defining the states of the state machine
-STATE_NORMAL = 0
-STATE_LG_SUCCESS_SUT_DEGRADED = 1
-STATE_LG_SUCCESS_SUT_FASTER = 2
-STATE_FAILED_FEW_WORKERS = 3
-STATE_FAILED_FEW_CONNECTIONS = 4
-
-STATE_LABELS = {
-    STATE_NORMAL: "NORMAL",
-    STATE_LG_SUCCESS_SUT_DEGRADED: "LG_SUCCESS_SUT_DEGRADED",
-    STATE_LG_SUCCESS_SUT_FASTER: "LG_SUCCESS_SUT_FASTER",
-    STATE_FAILED_FEW_WORKERS: "FAILED_FEW_WORKERS",
-    STATE_FAILED_FEW_CONNECTIONS: "FAILED_FEW_CONNECTIONS",
-}
-
-# Constants (Thresholds)
-DEFAULT_EPSILON = 0.05
-DEFAULT_BAND = 0.15
-DEFAULT_SCHED_MAX = 2.0
-DEFAULT_CONN_MAX = 5.0
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Consume live XLG windows with Stage B logic.")
+    parser.add_argument("--stage-a-thresholds", type=Path, required=True)
+    parser.add_argument("--trim-s", type=float, default=5.0)
+    return parser.parse_args()
 
 
-@dataclass
-class AnalyzerState:
-    # `anchor` tracks the rho value that defines the current regime's
-    # suppression band.
-    current_state: int = STATE_NORMAL
-    anchor: float = 1.0
+def stage_a_dir_from_thresholds(thresholds_path: Path, payload: dict[str, Any]) -> Path:
+    raw = payload["stage_a_dir"]
+    stage_a_dir = Path(str(raw))
+    if stage_a_dir.exists():
+        return stage_a_dir
+
+    candidate = thresholds_path.parent
+    if (candidate / "healthy").exists():
+        return candidate
 
 
-@dataclass
-class TransitionResult:
-    previous_state: int
-    current_state: int
-    anchor: float
-    reason: str
-    emd_suppressed: bool
-    terminal: bool
-
-
-def is_finite_number(value: Any) -> bool:
+def finite_float(value: Any) -> float:
     try:
-        return math.isfinite(float(value))
+        current = float(value)
     except (TypeError, ValueError):
-        return False
+        return float("nan")
+    return current if math.isfinite(current) else float("nan")
 
 
-def is_healthy_emd(emd_sched: float, emd_conn: float, sched_max: float, conn_max: float) -> bool:
-    return (
-        is_finite_number(emd_sched)
-        and is_finite_number(emd_conn)
-        and float(emd_sched) < sched_max
-        and float(emd_conn) < conn_max
-    )
-
-
-def transition_state(
-    analysis_state: AnalyzerState,
-    current: float,
-    emd_sched: float,
-    emd_conn: float,
+def score_payload(
+    payload: dict[str, Any],
+    reference: dict[str, list[float]],
+    normalizers: dict[str, float],
+    cheap_quantiles: dict[str, dict[str, float]],
+    rho_center: float,
     epsilon: float,
-    sched_max: float,
-    conn_max: float,
-) -> TransitionResult:
-    """Handling the state transitions"""
-    previous_state = analysis_state.current_state
+) -> dict[str, Any]:
+    rho = finite_float(payload.get("rho", float("nan")))
+    if rho == -1:
+        rho = float("nan")
 
-    # Terminal LG failures take priority over any regime classification.
-    if previous_state in (STATE_NORMAL, STATE_LG_SUCCESS_SUT_DEGRADED, STATE_LG_SUCCESS_SUT_FASTER):
-        if is_finite_number(emd_sched) and float(emd_sched) >= sched_max:
-            analysis_state.current_state = STATE_FAILED_FEW_WORKERS
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="terminal_sched_max",
-                emd_suppressed=False,
-                terminal=True,
-            )
+    scheduler_delays = payload.get("SchedulerDelays") or []
+    connection_delays = payload.get("ConnectionDelays") or []
 
-        if is_finite_number(emd_conn) and float(emd_conn) >= conn_max:
-            analysis_state.current_state = STATE_FAILED_FEW_CONNECTIONS
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="terminal_conn_max",
-                emd_suppressed=False,
-                terminal=True,
-            )
+    scheduler_mean = mean(scheduler_delays)
+    connection_mean = mean(connection_delays)
+    scheduler_median = median(scheduler_delays)
+    connection_p25 = quantile(connection_delays, 0.25)
+    worker_cap_near = is_worker_cap_near(
+        payload.get("AvgInFlight"),
+        payload.get("MaxWorkers"),
+    )
 
-    emd_is_healthy = is_healthy_emd(emd_sched, emd_conn, sched_max, conn_max)
-    lower_baseline = 1.0 - epsilon
-    upper_baseline = 1.0 + epsilon
+    # we use the cheap signals to determine whether to compute the EMD-based scores for this window, which are more expensive to compute
+    scheduler_quantile_trigger = cheap_signal_trigger(
+        scheduler_mean,
+        cheap_quantiles["scheduler_delay"],
+    )
+    connection_quantile_trigger = cheap_signal_trigger(
+        connection_p25,
+        cheap_quantiles["connection_delay"],
+    )
+    emd_computed, emd_reason = should_compute_emd(
+        rho=rho,
+        rho_center=rho_center,
+        epsilon=epsilon,
+        scheduler_quantile_trigger=scheduler_quantile_trigger,
+        connection_quantile_trigger=connection_quantile_trigger,
+        worker_cap_near=worker_cap_near,
+    )
 
-    # State 0 only exits when rho leaves the calibration band and LG internals
-    # still look healthy.
-    if previous_state == STATE_NORMAL and emd_is_healthy:
-        if current > upper_baseline:
-            analysis_state.current_state = STATE_LG_SUCCESS_SUT_DEGRADED
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="enter_degraded",
-                emd_suppressed=False,
-                terminal=False,
-            )
-        if current < lower_baseline:
-            analysis_state.current_state = STATE_LG_SUCCESS_SUT_FASTER
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="enter_faster",
-                emd_suppressed=False,
-                terminal=False,
-            )
-
-    if previous_state in (STATE_LG_SUCCESS_SUT_DEGRADED, STATE_LG_SUCCESS_SUT_FASTER) and emd_is_healthy:
-        if lower_baseline <= current <= upper_baseline:
-            analysis_state.current_state = STATE_NORMAL
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="recover_normal",
-                emd_suppressed=False,
-                terminal=False,
-            )
-
-        if previous_state == STATE_LG_SUCCESS_SUT_DEGRADED and current < lower_baseline:
-            analysis_state.current_state = STATE_LG_SUCCESS_SUT_FASTER
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="swap_to_faster",
-                emd_suppressed=False,
-                terminal=False,
-            )
-
-        if previous_state == STATE_LG_SUCCESS_SUT_FASTER and current > upper_baseline:
-            analysis_state.current_state = STATE_LG_SUCCESS_SUT_DEGRADED
-            analysis_state.anchor = current
-            return TransitionResult(
-                previous_state=previous_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="swap_to_degraded",
-                emd_suppressed=False,
-                terminal=False,
-            )
-
-        # Intra-state drift: the regime name did not change, but rho moved far
-        # enough to establish a new "normal" anchor for suppression.
-        analysis_state.anchor = current
-        return TransitionResult(
-            previous_state=previous_state,
-            current_state=analysis_state.current_state,
-            anchor=analysis_state.anchor,
-            reason="reanchor_same_state",
-            emd_suppressed=False,
-            terminal=False,
+    if emd_computed:
+        scheduler_score = normalized_score(
+            raw_emd(scheduler_delays, reference["scheduler_delay"]),
+            normalizers["scheduler_delay"],
         )
+    else:
+        scheduler_score = 0.0
 
-    return TransitionResult(
-        previous_state=previous_state,
-        current_state=analysis_state.current_state,
-        anchor=analysis_state.anchor,
-        reason="no_transition",
-        emd_suppressed=False,
-        terminal=analysis_state.current_state in (
-            STATE_FAILED_FEW_WORKERS,
-            STATE_FAILED_FEW_CONNECTIONS,
-        ),
-    )
+    connection_score = float("nan")
 
-def load_baseline_samples(samples_path: Path) -> dict[str, list[float]]:
-    """
-    Load baseline samples once so each incoming window can be compared against
-    the same reference distribution.
+    return {
+        "rho": rho,
+        "scheduler_score": scheduler_score,
+        "connection_score": connection_score,
+        "scheduler_mean_ms": scheduler_mean,
+        "connection_mean_ms": connection_mean,
+        "scheduler_median_ms": scheduler_median,
+        "connection_p25_ms": connection_p25,
+        "scheduler_mean_gt_healthy_p95": scheduler_quantile_trigger,
+        "connection_p25_gt_healthy_p95": connection_quantile_trigger,
+        "worker_cap_near": worker_cap_near,
+        "emd_computed": emd_computed,
+        "emd_reason": emd_reason,
+    }
 
-    We trim the first and last baseline windows to reduce startup/shutdown
-    artifacts, matching the approach used in attribution.py.
-    """
-    samples_df = pd.read_csv(samples_path)
-    samples_df["value_ms"] = pd.to_numeric(samples_df["value_ms"], errors="coerce")
-    samples_df["window_start"] = pd.to_datetime(samples_df["window_start"], errors="coerce")
-    samples_df["window_end"] = pd.to_datetime(samples_df["window_end"], errors="coerce")
 
-    window_results = (
-        samples_df[["window_start", "window_end"]]
-        .dropna()
-        .drop_duplicates()
-        .sort_values(["window_start", "window_end"])
-        .reset_index(drop=True)
-    )
-    trimmed_results = trim_window_margins(
-        window_results,
-        start_windows=TRIM_START_WINDOWS,
-        end_windows=TRIM_END_WINDOWS,
-    )
-    trimmed_keys = trimmed_results[["window_start", "window_end"]].drop_duplicates()
-    trimmed_samples = trimmed_keys.merge(
-        samples_df,
-        on=["window_start", "window_end"],
-        how="left",
-    )
+def format_metric(value: Any) -> str:
+    try:
+        current = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    if not math.isfinite(current):
+        return "nan"
+    return f"{current:.6f}"
 
-    baseline_samples: dict[str, list[float]] = {}
-    for metric_name, _ in METRIC_CONFIG.values():
-        metric_values = (
-            trimmed_samples[trimmed_samples["metric_name"] == metric_name]["value_ms"]
-            .dropna()
-            .astype(float)
-            .tolist()
+
+def emit_window_result(
+    window_idx: int,
+    elapsed_s: float,
+    score: dict[str, Any],
+    label: str,
+    terminal: bool,
+    reason: str,
+) -> None:
+    print(
+        "window={window} elapsed_s={elapsed} rho={rho} label={label} terminal={terminal} "
+        "reason={reason} scheduler_score={scheduler_score} connection_score={connection_score} "
+        "emd_computed={emd_computed} emd_reason={emd_reason} "
+        "scheduler_trigger={scheduler_trigger} connection_trigger={connection_trigger}".format(
+            window=window_idx,
+            elapsed=format_metric(elapsed_s),
+            rho=format_metric(score["rho"]),
+            label=label,
+            terminal=str(terminal).lower(),
+            reason=reason,
+            scheduler_score=format_metric(score["scheduler_score"]),
+            connection_score=format_metric(score["connection_score"]),
+            emd_computed=str(bool(score["emd_computed"])).lower(),
+            emd_reason=score["emd_reason"],
+            scheduler_trigger=str(bool(score["scheduler_mean_gt_healthy_p95"])).lower(),
+            connection_trigger=str(bool(score["connection_p25_gt_healthy_p95"])).lower(),
         )
-        baseline_samples[metric_name] = metric_values
-
-    return baseline_samples
+    )
+    sys.stdout.flush()
 
 
 def stdin_producer() -> None:
-    """
-    Read telemetry from stdin and keep only the newest windows if the consumer
-    falls behind.
-    """
-    while True:
+    """Producer thread that reads lines from stdin, extracts XLG window payloads, and enqueues them for processing."""
+    def enqueue(payload: dict[str, Any] | None) -> None:
+        """adds the payload to the queue, evicting old entries if the queue is full"""
+        try:
+            payload_queue.put_nowait(payload)
+        except queue.Full:
+            try:
+                payload_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                payload_queue.put_nowait(payload)
+            except queue.Full:
+                pass
 
-        # read the line
-        line = sys.stdin.readline()
-        if line == "":
-            break
-
+    for line in sys.stdin:
+        # ignoring packets that don't start with the expected prefix
         if not line.startswith(WINDOW_PREFIX):
             continue
 
@@ -284,151 +200,95 @@ def stdin_producer() -> None:
         except json.JSONDecodeError:
             continue
 
-        if not isinstance(payload, dict):
-            continue
+        if isinstance(payload, dict):
+            enqueue(payload)
 
-        # if the queue is full, drop the oldest payload to make room for the new one
-        try:
-            payload_queue.put_nowait(payload)
-        except queue.Full:
-            try:
-                payload_queue.get_nowait()
-            except queue.Empty:
-                pass
-
-            try:
-                payload_queue.put_nowait(payload)
-            except queue.Full:
-                pass
-
-
-def compute_window_emd(
-    payload: dict[str, Any], baseline_samples: dict[str, list[float]]
-) -> dict[str, float]:
-    """
-    Compute normalized EMD for the delay distributions carried by one window.
-    """
-    metrics: dict[str, float] = {}
-    for output_name, (baseline_metric, payload_key) in METRIC_CONFIG.items():
-        current_values = payload.get(payload_key) or []
-        metrics[output_name] = normalized_emd(
-            baseline_samples.get(baseline_metric, []),
-            current_values,
-        )
-    return metrics
-
-
-def emit_window_result(
-    current: float,
-    pacer_emd: Optional[float],
-    scheduler_emd: Optional[float],
-    connection_emd: Optional[float],
-    transition: TransitionResult,
-) -> None:
-    def format_metric(value: Optional[float]) -> str:
-        if value is None or not is_finite_number(value):
-            return "nan"
-        return f"{float(value):.6f}"
-
-    print(
-        "rho={rho:.6f} state={state} prev_state={prev_state} anchor={anchor:.6f} "
-        "reason={reason} emd_suppressed={emd_suppressed} terminal={terminal} "
-        "pacer_emd={pacer_emd} scheduler_emd={scheduler_emd} connection_emd={connection_emd}".format(
-            rho=float(current),
-            state=STATE_LABELS[transition.current_state],
-            prev_state=STATE_LABELS[transition.previous_state],
-            anchor=float(transition.anchor),
-            reason=transition.reason,
-            emd_suppressed=str(transition.emd_suppressed).lower(),
-            terminal=str(transition.terminal).lower(),
-            pacer_emd=format_metric(pacer_emd),
-            scheduler_emd=format_metric(scheduler_emd),
-            connection_emd=format_metric(connection_emd),
-        )
-    )
-    sys.stdout.flush()
+    enqueue(None)
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        print(
-            "usage: python3 scripts/consume_xlg_window.py <baseline_samples_csv>",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    args = parse_args()
+    stage_a_thresholds = read_json(args.stage_a_thresholds)
+    stage_a_dir = stage_a_dir_from_thresholds(args.stage_a_thresholds, stage_a_thresholds)
 
-    baseline_samples = load_baseline_samples(Path(sys.argv[1]))
-    analysis_state = AnalyzerState()
-    seen_windows = 0
+    # obtain the healthy runs
+    healthy_runs = run_dirs(stage_a_dir / "healthy")
+
+    # obtain the reference distribution and thresholds
+    reference = pooled_reference(healthy_runs, trim_s=args.trim_s)
+    thresholds = stage_a_thresholds["thresholds"]
+    normalizers = stage_a_thresholds["normalizers"]
+    rho_center = float(stage_a_thresholds["rho_center_fixed"])
+    epsilon = float(stage_a_thresholds["epsilon_fixed"])
+    cheap_quantiles = stage_a_thresholds["cheap_signal_quantiles"]
+    state = DiagnosisState()
 
     producer = threading.Thread(target=stdin_producer, daemon=True)
     producer.start()
 
+    first_window_start_ms: float | None = None
+    window_idx = 0
+    pending_payload: dict[str, Any] | None = None
+
     while True:
+        # obtain the payload
         payload = payload_queue.get()
-
-        rho = payload.get("rho", -1)
-        if rho == -1:
-            continue
-        if not is_finite_number(rho):
-            continue
-
-        seen_windows += 1
-        if seen_windows <= SKIP_INITIAL_WINDOWS:
-            continue
-
-        current = float(rho)
-
-        # Once terminal, stop consuming further windows for this process.
-        if analysis_state.current_state in (
-            STATE_FAILED_FEW_WORKERS,
-            STATE_FAILED_FEW_CONNECTIONS,
-        ):
+        if payload is None:
             break
 
-        # Suppress EMD while rho stays inside the anomaly regime's anchor band
-        # to avoid extra CPU work during stable periods.
-        if analysis_state.current_state in (
-            STATE_LG_SUCCESS_SUT_DEGRADED,
-            STATE_LG_SUCCESS_SUT_FASTER,
-        ) and (analysis_state.anchor - DEFAULT_BAND) <= current <= (analysis_state.anchor + DEFAULT_BAND):
-            transition = TransitionResult(
-                previous_state=analysis_state.current_state,
-                current_state=analysis_state.current_state,
-                anchor=analysis_state.anchor,
-                reason="suppressed_within_band",
-                emd_suppressed=True,
-                terminal=False,
-            )
-            emit_window_result(
-                current=current,
-                pacer_emd=None,
-                scheduler_emd=None,
-                connection_emd=None,
-                transition=transition,
-            )
+        # Keep one payload buffered so EOF drops the final artifact-prone window,
+        # matching scripts_eval.xlg_eval_common.trim_payloads.
+        if pending_payload is None:
+            pending_payload = payload
             continue
 
-        emd_metrics = compute_window_emd(payload, baseline_samples)
-        transition = transition_state(
-            analysis_state=analysis_state,
-            current=current,
-            emd_sched=float(emd_metrics["scheduler_emd"]),
-            emd_conn=float(emd_metrics["connection_emd"]),
-            epsilon=DEFAULT_EPSILON,
-            sched_max=DEFAULT_SCHED_MAX,
-            conn_max=DEFAULT_CONN_MAX,
+        current_payload = pending_payload
+        pending_payload = payload
+
+        window_start_ms = finite_float(current_payload.get("window_start", 0.0))
+        if first_window_start_ms is None:
+            first_window_start_ms = window_start_ms
+        elapsed_s = (window_start_ms - first_window_start_ms) / 1000.0
+
+        # we ignore the first payloads up to trim
+        if elapsed_s < args.trim_s:
+            continue
+
+        window_idx += 1
+
+        # computes EMD-based scores and other metrics for this window based on the payload and the reference distribution
+        score = score_payload(
+            payload=current_payload,
+            reference=reference,
+            normalizers=normalizers,
+            cheap_quantiles=cheap_quantiles,
+            rho_center=rho_center,
+            epsilon=epsilon,
         )
+
+        # apply the Stage B logic to obtain a diagnosis for this window
+        label, terminal, reason, _ = transition_window(
+            state=state,
+            rho=float(score["rho"]),
+            scheduler_score=float(score["scheduler_score"]),
+            scheduler_quantile_trigger=bool(score["scheduler_mean_gt_healthy_p95"]),
+            connection_quantile_trigger=bool(score["connection_p25_gt_healthy_p95"]),
+            worker_cap_near=bool(score["worker_cap_near"]),
+            emd_reason=str(score["emd_reason"]),
+            thresholds=thresholds,
+            rho_center=rho_center,
+            epsilon=epsilon,
+        )
+
+        # just a print statement
         emit_window_result(
-            current=current,
-            pacer_emd=float(emd_metrics["pacer_emd"]),
-            scheduler_emd=float(emd_metrics["scheduler_emd"]),
-            connection_emd=float(emd_metrics["connection_emd"]),
-            transition=transition,
+            window_idx=window_idx,
+            elapsed_s=elapsed_s,
+            score=score,
+            label=label,
+            terminal=terminal,
+            reason=reason,
         )
-
-        if transition.terminal:
-            break
 
 
 if __name__ == "__main__":
