@@ -13,28 +13,44 @@ from xlg_eval_common import (
 
 TRIM_S = 5.0
 THRESHOLDS_FILENAME = "stage_a_thresholds.json"
-# STAGE_A_PATHS = {
-#     1000: Path(f"experiments_eval/output/stage_a_fixed/run_20260426_011652/{THRESHOLDS_FILENAME}"),
-#     2000: Path(f"experiments_eval/output/stage_a_fixed/run_20260426_013506/{THRESHOLDS_FILENAME}"),
-#     3000: Path(f"experiments_eval/output/stage_a_fixed/run_20260426_015103/{THRESHOLDS_FILENAME}"),
-# }
-
-# STAGE_B_PATHS = {
-#     1000: Path("experiments_eval/output/stage_b_variable/run_20260426_011652"),
-#     2000: Path("experiments_eval/output/stage_b_variable/run_20260426_013506"),
-#     3000: Path("experiments_eval/output/stage_b_variable/run_20260426_015103"),
-# }
-
-STAGE_A_PATHS = {
-    1000: Path(f"HotelReservation_results/hotelreservation_rps_1000/stage_a_fixed/run_20260426_180606/{THRESHOLDS_FILENAME}"),
-    2000: Path(f"HotelReservation_results/hotelreservation_rps_1500/stage_a_fixed/run_20260426_182130/{THRESHOLDS_FILENAME}"),
-    3000: Path(f"HotelReservation_results/hotelreservation_rps_2000/stage_a_fixed/run_20260426_190347/{THRESHOLDS_FILENAME}"),
-}
-
-STAGE_B_PATHS = {
-    1000: Path("HotelReservation_results/hotelreservation_rps_1000/stage_b_variable/run_20260426_180606"),
-    2000: Path("HotelReservation_results/hotelreservation_rps_1500/stage_b_variable/run_20260426_182130"),
-    3000: Path("HotelReservation_results/hotelreservation_rps_2000/stage_b_variable/run_20260426_190347"),
+OUTPUT_PATH = Path("cross_rps_confusion_matrices_3_servers.png")
+SERVER_CONFIGS = {
+    "ExpServer": {
+        "stage_a_paths": {
+            1000: Path(f"data copy/ExpServer_results/stage_a_fixed/run_20260426_011652/{THRESHOLDS_FILENAME}"),
+            2000: Path(f"data copy/ExpServer_results/stage_a_fixed/run_20260426_013506/{THRESHOLDS_FILENAME}"),
+            3000: Path(f"data copy/ExpServer_results/stage_a_fixed/run_20260426_015103/{THRESHOLDS_FILENAME}"),
+        },
+        "stage_b_paths": {
+            1000: Path("data copy/ExpServer_results/stage_b_variable/run_20260426_011652"),
+            2000: Path("data copy/ExpServer_results/stage_b_variable/run_20260426_013506"),
+            3000: Path("data copy/ExpServer_results/stage_b_variable/run_20260426_015103"),
+        },
+    },
+    "HotelReservation": {
+        "stage_a_paths": {
+            1000: Path(f"data copy/HotelReservation_results/hotelreservation_rps_1000/stage_a_fixed/run_20260426_180606/{THRESHOLDS_FILENAME}"),
+            1500: Path(f"data copy/HotelReservation_results/hotelreservation_rps_1500/stage_a_fixed/run_20260426_182130/{THRESHOLDS_FILENAME}"),
+            2000: Path(f"data copy/HotelReservation_results/hotelreservation_rps_2000/stage_a_fixed/run_20260426_190347/{THRESHOLDS_FILENAME}"),
+        },
+        "stage_b_paths": {
+            1000: Path("data copy/HotelReservation_results/hotelreservation_rps_1000/stage_b_variable/run_20260426_180606"),
+            1500: Path("data copy/HotelReservation_results/hotelreservation_rps_1500/stage_b_variable/run_20260426_182130"),
+            2000: Path("data copy/HotelReservation_results/hotelreservation_rps_2000/stage_b_variable/run_20260426_190347"),
+        },
+    },
+    "SocialNetwork": {
+        "stage_a_paths": {
+            1000: Path(f"data copy/SocialNetwork_results/stage_a_fixed/run_20260502_205729/{THRESHOLDS_FILENAME}"),
+            1500: Path(f"data copy/SocialNetwork_results/stage_a_fixed/run_20260502_211916/{THRESHOLDS_FILENAME}"),
+            2000: Path(f"data copy/SocialNetwork_results/stage_a_fixed/run_20260502_210830/{THRESHOLDS_FILENAME}"),
+        },
+        "stage_b_paths": {
+            1000: Path("data copy/SocialNetwork_results/stage_b_variable/run_20260502_205729"),
+            1500: Path("data copy/SocialNetwork_results/stage_b_variable/run_20260502_211916"),
+            2000: Path("data copy/SocialNetwork_results/stage_b_variable/run_20260502_210830"),
+        },
+    },
 }
 
 import numpy as np
@@ -54,7 +70,7 @@ def paper_label(raw_label):
     return PAPER_LABELS.get(raw_label, raw_label.replace("_", " ").title())
 
 
-def plot_confusion_matrix_paper(confusion_df, out_path=None):
+def plot_confusion_matrix_on_axis(ax, confusion_df, title):
     counts = confusion_df.to_numpy(dtype=float)
 
     row_sums = counts.sum(axis=1, keepdims=True)
@@ -62,15 +78,12 @@ def plot_confusion_matrix_paper(confusion_df, out_path=None):
     display_columns = [paper_label(label) for label in confusion_df.columns]
     display_index = [paper_label(label) for label in confusion_df.index]
 
-    fig, ax = plt.subplots(figsize=(6.5, 5.5))
     im = ax.imshow(norm, cmap="Blues", vmin=0.0, vmax=1.0)
 
-    ax.set_xlabel("Predicted", fontsize=12)
-    ax.set_ylabel("Actual", fontsize=12)
     ax.set_xticks(range(len(confusion_df.columns)))
     ax.set_yticks(range(len(confusion_df.index)))
-    ax.set_xticklabels(display_columns, fontsize=9)
-    ax.set_yticklabels(display_index, fontsize=9)
+    ax.set_xticklabels(display_columns, fontsize=11)
+    ax.set_yticklabels(display_index, fontsize=11)
     ax.tick_params(length=0)
 
     for i in range(len(confusion_df.index)):
@@ -85,19 +98,57 @@ def plot_confusion_matrix_paper(confusion_df, out_path=None):
                 ha="center",
                 va="center",
                 color=color,
-                fontsize=9,
+                fontsize=10,
+                fontweight="semibold",
             )
 
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Row-normalized fraction", fontsize=11)
+    ax.set_title(title, fontsize=16, fontweight="bold", pad=12)
+    return im
 
-    ax.set_title("Cross-RPS Confusion Matrix", fontsize=13)
-    fig.tight_layout()
 
-    if out_path is not None:
-        fig.savefig(out_path, dpi=300, bbox_inches="tight")
-    else:
+def next_available_path(path):
+    if not path.exists():
+        return path
+
+    for idx in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}_{idx}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"no available output path for {path}")
+
+
+def plot_confusion_matrices_paper(confusions_by_server, out_path=None):
+    fig, axes = plt.subplots(
+        1,
+        len(confusions_by_server),
+        figsize=(19.5, 6.5),
+        sharey=True,
+        constrained_layout=True,
+    )
+    axes = np.atleast_1d(axes)
+
+    im = None
+    for ax, (server_name, confusion_df) in zip(axes, confusions_by_server.items()):
+        im = plot_confusion_matrix_on_axis(ax, confusion_df, server_name)
+
+    for ax in axes[1:]:
+        ax.tick_params(labelleft=False)
+
+    fig.supxlabel("Predicted diagnosis", fontsize=16, fontweight="bold")
+    fig.supylabel("Actual diagnosis", fontsize=16, fontweight="bold")
+    fig.suptitle("Cross-RPS Diagnosis Confusion Matrices", fontsize=18, fontweight="bold")
+
+    cbar = fig.colorbar(im, ax=axes, fraction=0.018, pad=0.012)
+    cbar.set_label("Row-normalized fraction", fontsize=13, fontweight="bold")
+    cbar.ax.tick_params(labelsize=11)
+
+    if out_path is None:
         plt.show()
+        return None
+
+    fig.savefig("cross_rps_confusion_matrix.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return "cross_rps_confusion_matrix.png"
 
 
 def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_dir):
@@ -140,21 +191,18 @@ def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_
     return pd.DataFrame(run_rows)
 
 
-if __name__ == "__main__":
-    # Generates an aggregate confusion matrix of cross-RPS
-    # - 1K --> 2K, 3K
-    # - 2K --> 3K
+def cross_rps_confusion(stage_a_paths, stage_b_paths, server_name):
     pair_rows_cross_rps = []
-    for stage_a_rate in STAGE_A_PATHS.keys():
-        for stage_b_rate in STAGE_B_PATHS.keys():
+    for stage_a_rate in stage_a_paths.keys():
+        for stage_b_rate in stage_b_paths.keys():
             if stage_a_rate < stage_b_rate:
-                print(f"Stage A {stage_a_rate} --> Stage B {stage_b_rate}")
+                print(f"{server_name}: Stage A {stage_a_rate} --> Stage B {stage_b_rate}")
                 run_preds_df = evaluate_stage_pair(
                     stage_a_rate,
-                    STAGE_A_PATHS[stage_a_rate],
+                    stage_a_paths[stage_a_rate],
                     stage_b_rate,
-                    STAGE_B_PATHS[stage_b_rate],
-                    )
+                    stage_b_paths[stage_b_rate],
+                )
 
                 pair_rows_cross_rps.append(run_preds_df)
 
@@ -168,5 +216,18 @@ if __name__ == "__main__":
         columns=LABEL_ORDER,
         fill_value=0,
     )
+    return cross_rps_confusion
 
-    plot_confusion_matrix_paper(cross_rps_confusion, out_path="cross_rps_confusion_matrix.png")
+
+if __name__ == "__main__":
+    confusions_by_server = {}
+    for server_name, config in SERVER_CONFIGS.items():
+        confusions_by_server[server_name] = cross_rps_confusion(
+            config["stage_a_paths"],
+            config["stage_b_paths"],
+            server_name,
+        )
+
+    saved_path = plot_confusion_matrices_paper(confusions_by_server, out_path=OUTPUT_PATH)
+    if saved_path is not None:
+        print(f"Wrote {saved_path}")
