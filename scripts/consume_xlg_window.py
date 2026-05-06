@@ -88,7 +88,7 @@ def score_payload(
 
     # we use the cheap signals to determine whether to compute the EMD-based scores for this window, which are more expensive to compute
     scheduler_quantile_trigger = cheap_signal_trigger(
-        scheduler_mean,
+        scheduler_median,
         cheap_quantiles["scheduler_delay"],
     )
     connection_quantile_trigger = cheap_signal_trigger(

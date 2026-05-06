@@ -556,7 +556,7 @@ def window_scores(
         else:
             # comparing the scheduler_mean with healthy p95 for scheduler delay
             scheduler_quantile_trigger = cheap_signal_trigger(
-                scheduler_mean,
+                scheduler_median,
                 cheap_quantiles["scheduler_delay"],
             )
 
