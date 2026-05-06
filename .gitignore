@@ -39,4 +39,7 @@ vendor
 *.gob
 *.lz
 
+*.pdf
+*.png
+
 .DS_Store
