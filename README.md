@@ -123,7 +123,7 @@ The raw data files are in the shared folder under `misleading_data/`
 
 ---
 
-### Figure 7
+### Table 4 and Figure 7
 
 Figure 7 can be reproduced by running the full evaluation pipeline.
 
@@ -154,6 +154,8 @@ The shared data directory includes all raw and intermediate data needed for this
   - `ExpServer_result.zip`
   - `HotelReservation_results.zip`
   - `SocialNetwork_results.zip`
+
+The confusion matrix and values in Table 4 were produced by running `scripts_eval/stage_b_cross_rps.py `
 
 ---
 
