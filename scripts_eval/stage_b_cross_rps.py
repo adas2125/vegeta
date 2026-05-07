@@ -1,6 +1,7 @@
 from pathlib import Path
 import pandas as pd
-
+import numpy as np
+import matplotlib.pyplot as plt
 from stage_b_evaluate import discover_condition_runs, stage_a_dir_from_thresholds
 from xlg_eval_common import (
     LABEL_ORDER,
@@ -11,9 +12,9 @@ from xlg_eval_common import (
     window_predictions,
 )
 
+# Constants and path configurations for the eval setup
 TRIM_S = 5.0
 THRESHOLDS_FILENAME = "stage_a_thresholds.json"
-OUTPUT_PATH = Path("cross_rps_confusion_matrices_3_servers.png")
 SERVER_CONFIGS = {
     "ExpServer": {
         "stage_a_paths": {
@@ -53,17 +54,18 @@ SERVER_CONFIGS = {
     },
 }
 
-import numpy as np
-import matplotlib.pyplot as plt
-
+# labels for the figure
 PAPER_LABELS = {
-    "FEW_CONNECTIONS": "Few\nconnections",
-    "FEW_WORKERS": "Few\nworkers",
-    "CPU_CONTENTION": "CPU\ncontention",
-    "SUT_DEGRADED": "SUT\ndegraded",
-    "SUT_FASTER": "SUT\nfaster",
+    "FEW_CONNECTIONS": "FewConnections",
+    "FEW_WORKERS": "FewWorkers",
+    "CPU_CONTENTION": "CpuContention",
+    "SUT_DEGRADED": "SuTDegraded",
+    "SUT_FASTER": "SuTFaster",
     "NORMAL": "Normal",
 }
+
+SEVERITIES = ['mild', 'mod', 'severe']
+TERMINALS = ['FEW_CONNECTIONS', 'FEW_WORKERS', 'CPU_CONTENTION']
 
 
 def paper_label(raw_label):
@@ -82,8 +84,14 @@ def plot_confusion_matrix_on_axis(ax, confusion_df, title):
 
     ax.set_xticks(range(len(confusion_df.columns)))
     ax.set_yticks(range(len(confusion_df.index)))
-    ax.set_xticklabels(display_columns, fontsize=11)
-    ax.set_yticklabels(display_index, fontsize=11)
+    ax.set_xticklabels(
+        display_columns,
+        fontsize=13,
+        rotation=35,
+        ha="right",
+        rotation_mode="anchor",
+    )
+    ax.set_yticklabels(display_index, fontsize=13)
     ax.tick_params(length=0)
 
     for i in range(len(confusion_df.index)):
@@ -98,26 +106,15 @@ def plot_confusion_matrix_on_axis(ax, confusion_df, title):
                 ha="center",
                 va="center",
                 color=color,
-                fontsize=10,
+                fontsize=12,
                 fontweight="semibold",
             )
 
-    ax.set_title(title, fontsize=16, fontweight="bold", pad=12)
+    ax.set_title(title, fontsize=20, fontweight="bold", pad=14)
     return im
 
 
-def next_available_path(path):
-    if not path.exists():
-        return path
-
-    for idx in range(1, 1000):
-        candidate = path.with_name(f"{path.stem}_{idx}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise FileExistsError(f"no available output path for {path}")
-
-
-def plot_confusion_matrices_paper(confusions_by_server, out_path=None):
+def plot_confusion_matrices_paper(confusions_by_server):
     fig, axes = plt.subplots(
         1,
         len(confusions_by_server),
@@ -134,21 +131,15 @@ def plot_confusion_matrices_paper(confusions_by_server, out_path=None):
     for ax in axes[1:]:
         ax.tick_params(labelleft=False)
 
-    fig.supxlabel("Predicted diagnosis", fontsize=16, fontweight="bold")
-    fig.supylabel("Actual diagnosis", fontsize=16, fontweight="bold")
-    fig.suptitle("Cross-RPS Diagnosis Confusion Matrices", fontsize=18, fontweight="bold")
+    fig.supxlabel("Predicted diagnosis", fontsize=19, fontweight="bold")
+    fig.supylabel("Actual diagnosis", fontsize=19, fontweight="bold")
 
     cbar = fig.colorbar(im, ax=axes, fraction=0.018, pad=0.012)
-    cbar.set_label("Row-normalized fraction", fontsize=13, fontweight="bold")
-    cbar.ax.tick_params(labelsize=11)
-
-    if out_path is None:
-        plt.show()
-        return None
+    cbar.set_label("Row-normalized fraction", fontsize=15, fontweight="bold")
+    cbar.ax.tick_params(labelsize=13)
 
     fig.savefig("cross_rps_confusion_matrix.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    return "cross_rps_confusion_matrix.png"
 
 
 def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_dir):
@@ -163,8 +154,16 @@ def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_
     epsilon = stage_a_payload["epsilon_fixed"]
     cheap_quantiles = stage_a_payload["cheap_signal_quantiles"]
 
+    when_latched = {}   # to track when the terminal label is latched on
+
+    # initializer when_latched with terminal labels and severities
+    for terminal in TERMINALS:
+        when_latched[terminal] = {severity: np.inf for severity in SEVERITIES}
+
     run_rows = []
-    for item in discover_condition_runs(stage_b_dir):
+    for item in discover_condition_runs(stage_b_dir):       
+        severity = item["severity"]     
+        actual_label = item["actual_label"]
         # run the stage B prediction using the stage A parameters and reference
         windows = window_predictions(
             run_dir=Path(item["run_dir"]),
@@ -178,6 +177,15 @@ def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_
         )
         predicted_label, _ = run_prediction_from_windows(windows)
 
+        # find the index of the row where "transition_reason" is "terminal_latched"
+        if predicted_label in TERMINALS:
+            latched_rows = windows[windows["transition_reason"] == "terminal_latched"]
+            if not latched_rows.empty:
+                # organize by actual label and severity, then take the index of the first latched row
+                when_latched[actual_label][severity] = latched_rows.index[0]
+            else:
+                when_latched[actual_label][severity] = np.inf
+
         # add the result to the list of rows for this stage pair
         run_rows.append(
             {
@@ -188,24 +196,25 @@ def evaluate_stage_pair(stage_a_rate, stage_a_thresholds, stage_b_rate, stage_b_
             }
         )
 
-    return pd.DataFrame(run_rows)
+    return pd.DataFrame(run_rows), when_latched
 
 
 def cross_rps_confusion(stage_a_paths, stage_b_paths, server_name):
     pair_rows_cross_rps = []
+    all_when_latched = {}
     for stage_a_rate in stage_a_paths.keys():
         for stage_b_rate in stage_b_paths.keys():
+            # only compare pairs where the stage A calibration rate is lower than the stage B rate
             if stage_a_rate < stage_b_rate:
                 print(f"{server_name}: Stage A {stage_a_rate} --> Stage B {stage_b_rate}")
-                run_preds_df = evaluate_stage_pair(
+                run_preds_df, when_latched = evaluate_stage_pair(
                     stage_a_rate,
                     stage_a_paths[stage_a_rate],
                     stage_b_rate,
                     stage_b_paths[stage_b_rate],
                 )
-
                 pair_rows_cross_rps.append(run_preds_df)
-
+                all_when_latched[(stage_a_rate, stage_b_rate)] = when_latched
     cross_rps_df = pd.concat(pair_rows_cross_rps, ignore_index=True)
     cross_rps_confusion = pd.crosstab(
         cross_rps_df["actual_label"],
@@ -216,18 +225,40 @@ def cross_rps_confusion(stage_a_paths, stage_b_paths, server_name):
         columns=LABEL_ORDER,
         fill_value=0,
     )
-    return cross_rps_confusion
+    return cross_rps_confusion, all_when_latched
+
+def output_stats(when_latched_by_server):
+    """
+    Returns the average index of when the terminal label is latched on for each server, severity, and terminal type.
+    """
+    for server_name, when_latched in when_latched_by_server.items():
+        print(f"Against {server_name}:")
+        for terminal in TERMINALS:
+            for severity in SEVERITIES:
+                latched_indices = []
+                for (stage_a_rate, stage_b_rate), latched_dict in when_latched.items():
+                    print(f"  Stage A {stage_a_rate} --> Stage B {stage_b_rate}: {terminal} - {severity} latched at index {latched_dict[terminal][severity]}")
+                    latched_index = latched_dict[terminal][severity]
+                    if np.isfinite(latched_index):
+                        latched_indices.append(latched_index)
+                if latched_indices:
+                    avg_index = np.mean(latched_indices)
+                    print(f"  {terminal} - {severity}: Average index of terminal latch = {avg_index:.2f}")
+                else:
+                    print(f"  {terminal} - {severity}: No terminal latch observed")
 
 
 if __name__ == "__main__":
     confusions_by_server = {}
+    when_latched_by_server = {}
     for server_name, config in SERVER_CONFIGS.items():
-        confusions_by_server[server_name] = cross_rps_confusion(
+        cm, when_latched = cross_rps_confusion(
             config["stage_a_paths"],
             config["stage_b_paths"],
             server_name,
         )
+        confusions_by_server[server_name] = cm
+        when_latched_by_server[server_name] = when_latched
 
-    saved_path = plot_confusion_matrices_paper(confusions_by_server, out_path=OUTPUT_PATH)
-    if saved_path is not None:
-        print(f"Wrote {saved_path}")
+    plot_confusion_matrices_paper(confusions_by_server)
+    output_stats(when_latched_by_server)
