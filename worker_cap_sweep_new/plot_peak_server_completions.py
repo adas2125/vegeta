@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Plot peak server completions during recovery for the worker-cap sweep."""
-
 import argparse
 import re
 from collections import defaultdict
@@ -38,14 +35,18 @@ def recovery_peak(server_log):
     saw_stall = False
     peaks = []
     for line in server_log.read_text(encoding="utf-8").splitlines():
+        # match with the regular expression to extract mode and completions
         match = LOG_RE.search(line)
         if not match:
             continue
         mode = match.group("mode")
         if mode == "stalled":
+            # note that we saw a stall
             saw_stall = True
         elif saw_stall and mode == "healthy":
+            # this is the recovery burst, we add the completions to our list of peaks
             peaks.append(int(match.group("completions")))
+    # return the maximum peak if we found any, otherwise return 0
     return max(peaks) if peaks else 0
 
 
@@ -53,8 +54,10 @@ def load_rows(root):
     rows = []
     for delay_dir in sorted(Path(root).glob("delay_*"), key=delay_key):
         delay = delay_dir.name.replace("delay_", "")
+        # skipping delay of 5ms
         if delay == "5ms":
             continue
+        # obtaining the adaptive peak for this delay
         adaptive_peak = recovery_peak(delay_dir / "adaptive" / "server.log")
         for cap_dir in sorted(delay_dir.glob("cap_*"), key=cap_key):
             rows.append(
@@ -62,16 +65,20 @@ def load_rows(root):
                     "delay": delay,
                     "cap": cap_key(cap_dir),
                     "adaptive_peak": adaptive_peak,
+                    # obtaining the capped peak for this cap and delay
                     "capped_peak": recovery_peak(cap_dir / "server.log"),
                 }
             )
     return rows
 
 
-def main():
+if __name__ == "__main__":
     args = parse_args()
+
+    # loading the rows from the runs directory
     rows = load_rows(args.root)
 
+    # At this point, it's just plitting
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -110,7 +117,3 @@ def main():
     fig.tight_layout()
     fig.savefig(output)
     print(f"wrote {output}")
-
-
-if __name__ == "__main__":
-    main()
