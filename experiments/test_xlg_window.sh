@@ -9,7 +9,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # a live reference-backed attack into the same Stage B state machine.
 
 URL="${URL:-GET http://localhost:8080/}"
-RATE="${RATE:-2000}"
+RATE="${RATE:-4000}"
+BASELINE_RATE="${BASELINE_RATE:-1000}"
 BASELINE_DURATION="${BASELINE_DURATION:-15s}"
 LIVE_DURATION="${LIVE_DURATION:-120s}"
 TRIM_S="${TRIM_S:-5.0}"
@@ -18,10 +19,10 @@ NUM_HEALTHY_RUNS="${NUM_HEALTHY_RUNS:-2}"
 SLEEP_BETWEEN_RUNS="${SLEEP_BETWEEN_RUNS:-5}"
 
 # Configurations for the attack
-WORKERS="${WORKERS:-150}"
-MAX_WORKERS="${MAX_WORKERS:-$WORKERS}"
-CONNECTIONS="${CONNECTIONS:-10000}"
-MAX_CONNECTIONS="${MAX_CONNECTIONS:-0}"
+WORKERS="${WORKERS:-10}"
+MAX_WORKERS="${MAX_WORKERS:-10000}"
+CONNECTIONS="${CONNECTIONS:-10}"
+MAX_CONNECTIONS="${MAX_CONNECTIONS:-200}"
 HTTP2="${HTTP2:-false}"
 OUT_ROOT="${OUT_ROOT:-xlg_window_test}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -33,7 +34,7 @@ CONSUMER_PID=""
 
 # the reference CSV
 REFERENCE_DIR="${STAGE_A_DIR}/reference"
-REFERENCE_CSV="${REFERENCE_DIR}/window_results_rps${RATE}.csv"
+REFERENCE_CSV="${REFERENCE_DIR}/window_results_rps${BASELINE_RATE}.csv"
 
 # outputs for the live run and the Stage A analysis
 THRESHOLDS_JSON="${STAGE_A_DIR}/stage_a_thresholds.json"
@@ -64,16 +65,16 @@ run_attack() {
   local reference_csv="$3"
 
   mkdir -p "$run_dir"
-  local metrics_csv="${run_dir}/metrics_rps${RATE}.csv"
-  local window_csv="${run_dir}/window_results_rps${RATE}.csv"
-  local samples_csv="${run_dir}/window_samples_rps${RATE}.csv"
-  local results_bin="${run_dir}/results_rps${RATE}.bin"
-  local xlg_log="${run_dir}/xlg_windows_rps${RATE}.log"
+  local metrics_csv="${run_dir}/metrics_rps${BASELINE_RATE}.csv"
+  local window_csv="${run_dir}/window_results_rps${BASELINE_RATE}.csv"
+  local samples_csv="${run_dir}/window_samples_rps${BASELINE_RATE}.csv"
+  local results_bin="${run_dir}/results_rps${BASELINE_RATE}.bin"
+  local xlg_log="${run_dir}/xlg_windows_rps${BASELINE_RATE}.log"
 
   local args=(
     attack
     -targets="$TARGETS_FILE"
-    -rate="$RATE"
+    -rate="$BASELINE_RATE"
     -duration="$duration"
     -workers="$WORKERS"
     -max-workers="$MAX_WORKERS"
@@ -108,7 +109,7 @@ for run_idx in $(seq 1 "$NUM_HEALTHY_RUNS"); do
     "$REFERENCE_CSV"
 done
 
-printf 'rate=%s\n' "$RATE" > "${STAGE_A_DIR}/run_config.env"
+printf 'rate=%s\n' "$BASELINE_RATE" > "${STAGE_A_DIR}/run_config.env"
 # running the stage A scripts to determine thresholds for the live attack
 python3 "${REPO_ROOT}/scripts_eval/stage_a_fixed_counts.py" \
   --stage-a-dir "$STAGE_A_DIR" \
