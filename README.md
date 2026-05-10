@@ -197,7 +197,7 @@ The main streaming experiment is provided in:
 experiments/test_xlg_window.sh
 ```
 
-This script tests the XLG tool in a streaming fashion and represents the main contribution of this fork.
+This script tests the XLG tool in a streaming fashion and represents the main contribution of this fork. It can really be run with any server as long as its running on localhost:8080 (obviously, this can be changed to), but we recommend running it with `cmd/ramping_regime_shift_server/main.go`, since that tickles every coniditon other than CPU contention.
 
 ## Notes
 
