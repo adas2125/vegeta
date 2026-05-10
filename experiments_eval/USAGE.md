@@ -22,8 +22,6 @@ Defaults:
 - CPU contention: background `yes` processes; defaults are mild/mod/severe = `150/200/250` jobs
 - Worker and connection bottlenecks: caps come from Stage B baseline latency plus mild/mod/severe offsets of `6ms/4ms/2ms`; Stage B ramps network delay on top of normal delay during these runs
 
-The shell scripts now print concise progress only. Per-run details are kept in each output directory.
-
 The collection scripts set client-side netem automatically on the load-generator VM using `NETEM_IFACE`. Netem is removed automatically on script exit.
 
 ## Full Pipeline
@@ -169,9 +167,6 @@ FEW_CONNECTIONS, FEW_WORKERS, CPU_CONTENTION, SUT_DEGRADED, SUT_FASTER, NORMAL
 ```
 
 ## Notes
-
-The scripts create directories with `mkdir -p`. If you reuse an output directory, files from matching run names can be replaced.
-
 One extra reference run is collected in Stage A. Stage B condition collection reuses that Stage A reference CSV so `observed_R` is calibrated against Stage A. Stage B baseline runs feed the Stage B reference/settings step. In the full pipeline, Stage B baseline and condition collection use `TARGET_RPS` when it is set.
 
 For `FEW_WORKERS` and `FEW_CONNECTIONS`, Stage B starts at `NORMAL_NETWORK_DELAY` and applies repeated `tc qdisc replace` calls during the Vegeta run until reaching `NORMAL_NETWORK_DELAY + BOTTLENECK_RAMP_EXTRA_DELAY`. The attack is not paused or restarted while the delay changes.
